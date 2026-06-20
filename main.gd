@@ -112,6 +112,17 @@ const CRASH_TIME := 1.0
 const COL_SPEED_MAX := Color("ff5a5f")
 const COL_SPEED := Color("e8e8e8")
 
+# ---------------- speedometer gauge ----------------
+const GAUGE_CENTER := Vector2(118.0, 156.0)
+const GAUGE_R := 84.0
+const GAUGE_START_DEG := 140.0
+const GAUGE_END_DEG := 400.0
+const GAUGE_MAX_KMH := 340.0      # ~MAX_SPEED * BOOST_MULT converted to km/h
+const COL_GAUGE_BG := Color(0, 0, 0, 0.35)
+const COL_GAUGE_RING := Color(1, 1, 1, 0.25)
+const COL_GAUGE_TICK := Color(1, 1, 1, 0.4)
+const COL_GAUGE_REDZONE := Color("ff5a5f")
+
 # ---------------- save ----------------
 const SAVE_PATH := "user://twisty_roads.cfg"
 
@@ -208,14 +219,25 @@ var _ui_font: Font
 
 # ---------------- audio ----------------
 # Convention-based, like the art slots: drop a file at res://audio/<name>.ogg
-# (or .wav) and it plays automatically. Missing files are a silent no-op, so
-# the game runs identically with or without audio assets present.
+# (or .wav/.mp3) and it plays automatically. Missing files are a silent no-op,
+# so the game runs identically with or without audio assets present.
+# Engine is two crossfaded loops (engine_low/engine_high) rather than one
+# loop with a wide pitch shift, so going fast changes the engine's timbre
+# instead of just speeding up its pitch — avoids the droney/chipmunk effect.
+# Expected slots: crash, coin, land, near_miss, jump, oil_squeal, horn,
+# purchase, challenge, ui_tap, engine_low, engine_high.
 var _sfx_crash: AudioStreamPlayer
 var _sfx_coin: AudioStreamPlayer
 var _sfx_land: AudioStreamPlayer
 var _sfx_near_miss: AudioStreamPlayer
+var _sfx_jump: AudioStreamPlayer
+var _sfx_oil: AudioStreamPlayer
+var _sfx_beep: AudioStreamPlayer
+var _sfx_purchase: AudioStreamPlayer
+var _sfx_challenge: AudioStreamPlayer
 var _sfx_ui: AudioStreamPlayer
-var _music_engine: AudioStreamPlayer
+var _engine_low: AudioStreamPlayer
+var _engine_high: AudioStreamPlayer
 
 var _micro_noise := FastNoiseLite.new()
 var _touch_ids: Dictionary = {}
@@ -235,7 +257,6 @@ var _theme_buttons := {}
 var _challenge_labels: Array = []
 var _hud_score: Label
 var _hud_coins: Label
-var _hud_speed: Label
 var _hud_prompt: Label
 var _go_score: Label
 var _go_coins: Label
@@ -326,13 +347,30 @@ func _build_audio() -> void:
 	_sfx_coin = _make_player("coin", "Master", -4.0)
 	_sfx_land = _make_player("land", "Master", -2.0)
 	_sfx_near_miss = _make_player("near_miss", "Master", -2.0)
+	_sfx_jump = _make_player("jump", "Master", -2.0)
+	_sfx_oil = _make_player("oil_squeal", "Master", -3.0)
+	_sfx_beep = _make_player("horn", "Master", -6.0)
+	_sfx_purchase = _make_player("purchase", "Master", -3.0)
+	_sfx_challenge = _make_player("challenge", "Master", -2.0)
 	_sfx_ui = _make_player("ui_tap", "Master", -6.0)
-	_music_engine = _make_player("engine", "Master", -10.0)
+	_engine_low = _make_player("engine_low", "Master", -10.0)
+	_engine_high = _make_player("engine_high", "Master", -10.0)
 
 
 func _play_sfx(p: AudioStreamPlayer) -> void:
 	if p != null and p.stream != null:
 		p.play()
+
+
+# Crossfades two engine loops by speed instead of pitch-shifting one loop
+# across a wide range, so the engine note changes character rather than
+# turning into an irritating chipmunk/drone at the extremes.
+func _update_engine_audio() -> void:
+	var frac := clampf((current_speed() - BASE_SPEED) / (MAX_SPEED * BOOST_MULT - BASE_SPEED), 0.0, 1.0)
+	_engine_low.volume_db = lerpf(-6.0, -26.0, frac)
+	_engine_high.volume_db = lerpf(-26.0, -6.0, frac)
+	_engine_low.pitch_scale = lerpf(0.85, 1.15, frac)
+	_engine_high.pitch_scale = lerpf(0.95, 1.25, frac)
 
 
 # ============================================================
@@ -374,8 +412,6 @@ func _build_ui() -> void:
 	_hud = _make_panel(layer)
 	_hud_score = _make_label(_hud, "0", Vector2(0, 36), Vector2(SCREEN_W, 80), 64)
 	_hud_coins = _make_label(_hud, "Coins: 0", Vector2(0, 124), Vector2(SCREEN_W, 50), 34)
-	_hud_speed = _make_label(_hud, "", Vector2(20, 40), Vector2(280, 50), 30)
-	_hud_speed.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	_hud_prompt = _make_label(_hud, "Tap to begin\nHold to steer", Vector2(0, 540), Vector2(SCREEN_W, 200), 52)
 	_make_button(_hud, "II", Vector2(600, 30), Vector2(96, 72), 40).pressed.connect(_pause_game)
 
@@ -498,13 +534,13 @@ func _start_run() -> void:
 	_run_started = false
 	_apply_theme(selected)
 	_reset_world()
-	_music_engine.stop()
+	_engine_low.stop()
+	_engine_high.stop()
 	_ensure_track(distance + 1400.0)
 	_ensure_hazards(distance + 1400.0)
 	_ensure_coins(distance + 1400.0)
 	_hud_score.text = "0"
 	_hud_coins.text = "Coins: 0"
-	_hud_speed.text = ""
 	_hud_prompt.visible = true
 	_show_screen()
 
@@ -513,7 +549,8 @@ func _pause_game() -> void:
 	if state != State.PLAYING:
 		return
 	state = State.PAUSED
-	_music_engine.stream_paused = true
+	_engine_low.stream_paused = true
+	_engine_high.stream_paused = true
 	_show_screen()
 	queue_redraw()
 
@@ -523,7 +560,8 @@ func _resume() -> void:
 	_count_timer = COUNT_TIME
 	_steer_armed = false
 	_hud_prompt.visible = false
-	_music_engine.stream_paused = false
+	_engine_low.stream_paused = false
+	_engine_high.stream_paused = false
 	_show_screen()
 	queue_redraw()
 
@@ -535,7 +573,8 @@ func _crash() -> void:
 	_crash_timer = CRASH_TIME
 	Input.vibrate_handheld(220)
 	_spawn_explosion(_sx(car_x), CAR_Y)
-	_music_engine.stop()
+	_engine_low.stop()
+	_engine_high.stop()
 	_play_sfx(_sfx_crash)
 
 
@@ -564,6 +603,7 @@ func _game_over() -> void:
 			bonus += int(ch["reward"])
 			names.append(str(ch["desc"]))
 		_go_challenge.text = "Challenge complete! +%d coins\n%s" % [bonus, ", ".join(names)]
+		_play_sfx(_sfx_challenge)
 	_show_screen()
 
 
@@ -580,6 +620,7 @@ func _on_theme_pressed(id: String) -> void:
 			selected = id
 			_apply_theme(id)
 			_save()
+			_play_sfx(_sfx_purchase)
 	_refresh_store()
 	queue_redraw()
 
@@ -687,15 +728,17 @@ func _update_play(delta: float) -> void:
 		if down:
 			_run_started = true
 			_hud_prompt.visible = false
-			if _music_engine.stream != null:
-				_music_engine.play()
+			if _engine_low.stream != null:
+				_engine_low.play()
+			if _engine_high.stream != null:
+				_engine_high.play()
 		else:
 			camera_x = car_x
 			return
 
 	time_alive += delta
 	distance += current_speed() * delta
-	_music_engine.pitch_scale = clampf(current_speed() / BASE_SPEED, 0.7, 2.2)
+	_update_engine_audio()
 
 	_ensure_track(distance + 1400.0)
 	_ensure_hazards(distance + 1400.0)
@@ -758,7 +801,6 @@ func _update_play(delta: float) -> void:
 	if state != State.PLAYING:
 		return
 
-	_update_speedometer()
 	_update_popups(delta)
 
 	for coin in _coins:
@@ -869,7 +911,7 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 			if not h["scored"] and dy < COL_HALF_H + BLOCK_H * 0.5 + 20.0 and dx < NEAR_MISS_DX:
 				h["scored"] = true
 				session_coins += NEAR_MISS_COINS
-				_add_popup(_sx(car_x), CAR_Y - 60.0, "NEAR MISS +%d" % NEAR_MISS_COINS, false)
+				_add_popup(_sx(car_x), CAR_Y - 60.0, "Near Miss! +%d" % NEAR_MISS_COINS, true, 220.0, true)
 				_play_sfx(_sfx_near_miss)
 		elif htype == "traffic":
 			if not airborne and dy < COL_HALF_H + TRAFFIC_H * 0.5 and dx < COL_HALF_W + TRAFFIC_W * 0.5:
@@ -879,16 +921,24 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 			if not h["scored"] and dy < COL_HALF_H + 20.0 and dx < NEAR_MISS_DX:
 				h["scored"] = true
 				session_coins += NEAR_MISS_COINS
-				_add_popup(_sx(car_x), CAR_Y - 60.0, "NEAR MISS +%d" % NEAR_MISS_COINS, false)
+				_add_popup(_sx(car_x), CAR_Y - 60.0, "Near Miss! +%d" % NEAR_MISS_COINS, true, 220.0, true)
 				_play_sfx(_sfx_near_miss)
+			# random oncoming horn while the car is on screen ahead/behind
+			var bt: float = float(h.get("beep_t", randf_range(0.8, 2.4))) - delta
+			if bt <= 0.0 and dy < 650.0:
+				bt = randf_range(1.6, 3.6)
+				_play_sfx(_sfx_beep)
+			h["beep_t"] = bt
 		elif htype == "oil":
 			if not h["hit"] and dy < OIL_R and dx < OIL_R:
 				h["hit"] = true
 				_oil_timer = OIL_TIME
+				_play_sfx(_sfx_oil)
 		elif htype == "jump":
 			if not h["hit"] and dy < COL_HALF_H + JUMP_H * 0.5 and dx < COL_HALF_W + JUMP_W * 0.5:
 				h["hit"] = true
 				_air_timer = AIR_TIME
+				_play_sfx(_sfx_jump)
 
 
 # ============================================================
@@ -957,8 +1007,8 @@ func _update_tire_marks(delta: float) -> void:
 		i -= 1
 
 
-func _add_popup(sx_pos: float, sy_pos: float, text: String, coin: bool) -> void:
-	_popups.append({ "pos": Vector2(sx_pos, sy_pos), "text": text, "age": 0.0, "coin": coin })
+func _add_popup(sx_pos: float, sy_pos: float, text: String, coin: bool, width: float = 160.0, inline: bool = false) -> void:
+	_popups.append({ "pos": Vector2(sx_pos, sy_pos), "text": text, "age": 0.0, "coin": coin, "width": width, "inline": inline })
 
 
 func _update_popups(delta: float) -> void:
@@ -1003,19 +1053,6 @@ func _dist_km() -> float:
 func road_half_width(d: float) -> float:
 	var base := clampf(START_HALF_WIDTH - d * NARROW_PER_DIST, MIN_HALF_WIDTH, START_HALF_WIDTH)
 	return base + _breather(d) * RHYTHM_WIDTH_AMP
-
-
-func _update_speedometer() -> void:
-	var kmh := int(current_speed() / PX_PER_METER * 3.6)
-	if _ramp_speed() >= MAX_SPEED - 0.5:
-		_hud_speed.text = "MAX  %d KM/H" % kmh
-		_hud_speed.add_theme_color_override("font_color", COL_SPEED_MAX)
-	elif _boost_timer > 0.0:
-		_hud_speed.text = "BOOST  %d KM/H" % kmh
-		_hud_speed.add_theme_color_override("font_color", COL_BOOST)
-	else:
-		_hud_speed.text = "%d KM/H" % kmh
-		_hud_speed.add_theme_color_override("font_color", COL_SPEED)
 
 
 func _turn_factor() -> float:
@@ -1190,6 +1227,43 @@ func _car_angle() -> float:
 	return clampf(lateral_velocity / STEER_SPEED, -1.0, 1.0) * MAX_TILT
 
 
+# Speed gauge: a swept dial (gap at the bottom) with a redline zone, tick
+# marks, and a needle, drawn in fixed screen space like the other HUD overlays.
+func _draw_speedometer() -> void:
+	var kmh := current_speed() / PX_PER_METER * 3.6
+	var frac := clampf(kmh / GAUGE_MAX_KMH, 0.0, 1.0)
+	var redline_frac := clampf((MAX_SPEED / PX_PER_METER * 3.6) / GAUGE_MAX_KMH, 0.0, 1.0)
+	var start_rad := deg_to_rad(GAUGE_START_DEG)
+	var end_rad := deg_to_rad(GAUGE_END_DEG)
+
+	var needle_col := COL_SPEED
+	if _ramp_speed() >= MAX_SPEED - 0.5:
+		needle_col = COL_SPEED_MAX
+	elif _boost_timer > 0.0:
+		needle_col = COL_BOOST
+
+	draw_circle(GAUGE_CENTER, GAUGE_R + 14.0, COL_GAUGE_BG)
+	draw_arc(GAUGE_CENTER, GAUGE_R, start_rad, end_rad, 48, COL_GAUGE_RING, 8.0, true)
+	var redline_rad := deg_to_rad(lerpf(GAUGE_START_DEG, GAUGE_END_DEG, redline_frac))
+	draw_arc(GAUGE_CENTER, GAUGE_R, redline_rad, end_rad, 16, COL_GAUGE_REDZONE, 8.0, true)
+
+	for i in range(7):
+		var t := i / 6.0
+		var rad := deg_to_rad(lerpf(GAUGE_START_DEG, GAUGE_END_DEG, t))
+		var dir := Vector2(cos(rad), sin(rad))
+		draw_line(GAUGE_CENTER + dir * (GAUGE_R - 6.0), GAUGE_CENTER + dir * (GAUGE_R + 8.0), COL_GAUGE_TICK, 3.0)
+
+	var needle_rad := deg_to_rad(lerpf(GAUGE_START_DEG, GAUGE_END_DEG, frac))
+	var tip := GAUGE_CENTER + Vector2(cos(needle_rad), sin(needle_rad)) * (GAUGE_R - 16.0)
+	draw_line(GAUGE_CENTER, tip, needle_col, 5.0, true)
+	draw_circle(GAUGE_CENTER, 9.0, needle_col)
+	draw_circle(GAUGE_CENTER, 5.0, Color(0, 0, 0, 0.6))
+
+	if _ui_font != null:
+		draw_string(_ui_font, GAUGE_CENTER + Vector2(-50, GAUGE_R + 26.0), "%d" % int(kmh), HORIZONTAL_ALIGNMENT_CENTER, 100, 32, needle_col)
+		draw_string(_ui_font, GAUGE_CENTER + Vector2(-50, GAUGE_R + 50.0), "KM/H", HORIZONTAL_ALIGNMENT_CENTER, 100, 16, Color(1, 1, 1, 0.55))
+
+
 func _draw() -> void:
 	draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), col_offroad)
 	_draw_parallax()
@@ -1315,19 +1389,30 @@ func _draw() -> void:
 			var bpos: Vector2 = b["pos"]
 			draw_circle(bpos, float(b["r"]) * (0.5 + brem * 0.8), bcol)
 
+	if state == State.PLAYING or state == State.COUNTDOWN or state == State.CRASH:
+		_draw_speedometer()
+
 	# floating pickup popups
 	for p in _popups:
 		var prem := 1.0 - float(p["age"]) / POPUP_LIFE
 		if prem <= 0.0:
 			continue
 		var pp2: Vector2 = p["pos"]
+		var pw: float = p["width"]
+		var inline: bool = p["inline"]
 		if bool(p["coin"]):
 			var cc := COL_COIN
 			cc.a = prem
-			draw_circle(pp2 + Vector2(0, 2), COIN_R * 0.7, cc)
+			if inline:
+				draw_circle(pp2 + Vector2(-pw * 0.5 + 14.0, 2), COIN_R * 0.7, cc)
+			else:
+				draw_circle(pp2 + Vector2(0, 2), COIN_R * 0.7, cc)
 		if _ui_font != null:
 			var txt: String = p["text"]
-			draw_string(_ui_font, pp2 + Vector2(-60, -14), txt, HORIZONTAL_ALIGNMENT_CENTER, 120, 30, Color(1, 1, 1, prem))
+			if inline:
+				draw_string(_ui_font, pp2 + Vector2(-pw * 0.5 + 34.0, -14), txt, HORIZONTAL_ALIGNMENT_LEFT, pw - 34.0, 28, Color(1, 1, 1, prem))
+			else:
+				draw_string(_ui_font, pp2 + Vector2(-pw * 0.5, -14), txt, HORIZONTAL_ALIGNMENT_CENTER, pw, 30, Color(1, 1, 1, prem))
 
 	# resume countdown
 	if state == State.COUNTDOWN:
