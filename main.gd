@@ -71,6 +71,24 @@ const MAX_TILT := 0.45
 const MICRO_AMP := 0.0            # 0 = perfectly smooth edges
 const DASH_PERIOD := 90.0
 
+# ---------------- branches: forks & roundabouts ----------------
+# road_center/road_half_width describe ONE continuous centerline. A "branch"
+# turns a straight stretch into two lanes (symmetric about the centerline) that
+# separate and then merge back — the road forks. With a wide enough separation
+# the gap between the lanes becomes an island, and the feature reads as a
+# roundabout. Branches are the multi-lane "segments" layered on top of the
+# centerline; this is what lets the road fork and loop without the centerline
+# having to be multi-valued.
+const BRANCH_SPACING := 4200.0    # min gap between one branch ending and the next starting
+const BRANCH_LEN_FORK := 1500.0
+const BRANCH_LEN_ROUND := 1750.0
+const BRANCH_RAMP := 0.2          # fraction of the length spent splitting / merging
+const BRANCH_HW := 88.0           # half-width of each split lane
+const FORK_OFFSET := 150.0        # lane-center offset from the centerline at full split
+const ROUND_OFFSET := 215.0       # roundabouts separate further to make room for the island
+const BRANCH_STRAIGHT_DELTA := 70.0  # only split where the road runs this straight (per 300px)
+const BRANCH_COINS := 4           # coins seeded along the scenic lane
+
 # ---------------- coins ----------------
 const COIN_SPACING := 1900.0
 const COIN_R := 15.0
@@ -189,6 +207,11 @@ var _track_frontier_d := 0.0
 var _track_last_x := ROAD_CENTER_X
 var _bias := 0.0
 var _pattern_queue: Array = []
+
+# forks & roundabouts layered on the centerline (see BRANCHES section)
+var _branches: Array[Dictionary] = []
+var _branch_frontier_d := 0.0
+var _next_branch_d := 0.0          # earliest distance the next branch may start
 
 var _coins: Array = []
 var _coin_frontier_d := 0.0
@@ -461,6 +484,9 @@ func _reset_world() -> void:
 	_pattern_queue.clear()
 	_coin_frontier_d = 0.0
 	_hazard_frontier_d = 0.0
+	_branches.clear()
+	_branch_frontier_d = 0.0
+	_next_branch_d = INTRO_DIST + 1200.0
 	_streak = 0
 	_streak_best = 0
 	_no_coin_timer = 0.0
@@ -500,6 +526,7 @@ func _start_run() -> void:
 	_reset_world()
 	_music_engine.stop()
 	_ensure_track(distance + 1400.0)
+	_ensure_branches(distance + 1400.0)
 	_ensure_hazards(distance + 1400.0)
 	_ensure_coins(distance + 1400.0)
 	_hud_score.text = "0"
@@ -698,12 +725,13 @@ func _update_play(delta: float) -> void:
 	_music_engine.pitch_scale = clampf(current_speed() / BASE_SPEED, 0.7, 2.2)
 
 	_ensure_track(distance + 1400.0)
+	_ensure_branches(distance + 1400.0)
 	_ensure_hazards(distance + 1400.0)
 	_ensure_coins(distance + 1400.0)
 	_drop_old()
 
 	# camera follows the car (with a little look-ahead toward the upcoming road)
-	var look := road_center(distance + CAM_LOOKAHEAD)
+	var look := _nearest_lane_center(distance + CAM_LOOKAHEAD, car_x)
 	var cam_target := lerpf(car_x, look, CAM_LOOK_W)
 	camera_x = lerpf(camera_x, cam_target, clampf(CAM_FOLLOW * delta, 0.0, 1.0))
 	camera_x = clampf(camera_x, car_x - CAM_MAX_OFF, car_x + CAM_MAX_OFF)
@@ -747,12 +775,9 @@ func _update_play(delta: float) -> void:
 	if _no_coin_timer > _no_coin_best:
 		_no_coin_best = _no_coin_timer
 
-	if not airborne:
-		var c := road_center(distance)
-		var hw := road_half_width(distance)
-		if absf(car_x - c) > hw - COL_HALF_W:
-			_crash()
-			return
+	if not airborne and not _on_any_lane(distance, car_x):
+		_crash()
+		return
 
 	_update_hazards(delta, airborne)
 	if state != State.PLAYING:
@@ -788,13 +813,22 @@ func _drop_old() -> void:
 	while _pt_d.size() > 2 and _pt_d[1] < distance - 500.0:
 		_pt_d.remove_at(0)
 		_pt_x.remove_at(0)
-	while _coins.size() > 0 and float(_coins[0]["d"]) < distance - 500.0:
-		_coins.remove_at(0)
+	# coins can be seeded out of distance-order (branch coins), so scan all
+	var ci := _coins.size() - 1
+	while ci >= 0:
+		if float(_coins[ci]["d"]) < distance - 500.0:
+			_coins.remove_at(ci)
+		ci -= 1
 	var i := _hazards.size() - 1
 	while i >= 0:
 		if float(_hazards[i]["d"]) < distance - 600.0:
 			_hazards.remove_at(i)
 		i -= 1
+	var bi := _branches.size() - 1
+	while bi >= 0:
+		if float(_branches[bi]["d1"]) < distance - 700.0:
+			_branches.remove_at(bi)
+		bi -= 1
 
 
 # ============================================================
@@ -807,6 +841,8 @@ func _ensure_hazards(up_to: float) -> void:
 		var d := _hazard_frontier_d
 		if d < INTRO_DIST:
 			continue
+		if _in_branch(d):
+			continue   # the fork itself is the challenge here
 		# only place where the road is roughly straight, so it's always avoidable
 		if absf(road_center(d + 50.0) - road_center(d - 50.0)) > STRAIGHT_DELTA:
 			continue
@@ -853,8 +889,8 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 			var tgt := road_center(td) + float(h["lane"]) * hwt
 			var oldx := float(h["x"])
 			var nx := move_toward(oldx, tgt, TRAFFIC_LAT_SPEED * delta)
-			# never let it drift off the road, even on a sharp curve
-			nx = clampf(nx, road_center(td) - (hwt - COL_HALF_W), road_center(td) + (hwt - COL_HALF_W))
+			# keep it on an actual lane (matters through forks & roundabouts)
+			nx = _clamp_to_nearest_lane(td, nx)
 			h["x"] = nx
 			h["ang"] = clampf((nx - oldx) / maxf(TRAFFIC_LAT_SPEED * delta, 0.001), -1.0, 1.0) * 0.4
 		var hd := float(h["d"])
@@ -1127,6 +1163,116 @@ func road_center(d: float) -> float:
 	return _pt_x[n - 1]
 
 
+# ============================================================
+#  BRANCHES (forks & roundabouts layered on the centerline)
+# ============================================================
+# road_lanes() is the multi-lane view the rest of the game queries. Normally it
+# returns one lane twice (the plain road); inside a branch it returns the two
+# split lanes. road_center()/road_half_width() stay the single continuous
+# centerline the branches ride on.
+func road_lanes(d: float) -> Array[Dictionary]:
+	var c := road_center(d)
+	var fullhw := road_half_width(d)
+	var b := _branch_at(d)
+	if b.is_empty():
+		return [{ "c": c, "hw": fullhw }, { "c": c, "hw": fullhw }]
+	var t := (d - float(b["d0"])) / (float(b["d1"]) - float(b["d0"]))
+	var a := _branch_arch(t)
+	var s := a * float(b["off"])                       # how far the lanes have split
+	var hw := lerpf(fullhw, float(b["hw"]), a)         # lanes narrow as they separate
+	return [{ "c": c - s, "hw": hw }, { "c": c + s, "hw": hw }]
+
+
+func _branch_at(d: float) -> Dictionary:
+	for b in _branches:
+		if d >= float(b["d0"]) and d <= float(b["d1"]):
+			return b
+	return {}
+
+
+# Separation profile: 0 at the ends (lanes merged into the centerline), ramping
+# smoothly to 1 across the middle (lanes fully split). This is what makes a fork
+# open out of, and close back into, a single road seamlessly.
+func _branch_arch(t: float) -> float:
+	if t <= 0.0 or t >= 1.0:
+		return 0.0
+	if t < BRANCH_RAMP:
+		return smoothstep(0.0, 1.0, t / BRANCH_RAMP)
+	if t > 1.0 - BRANCH_RAMP:
+		return smoothstep(0.0, 1.0, (1.0 - t) / BRANCH_RAMP)
+	return 1.0
+
+
+# True anywhere inside a branch feature (entry/exit ramps included). Standard
+# hazards and coins stay out of the whole thing — they'd be placed against the
+# single centerline, which is wrong once the lanes start separating — so the
+# fork stays its own clean navigation test.
+func _in_branch(d: float) -> bool:
+	return not _branch_at(d).is_empty()
+
+
+func _on_any_lane(d: float, x: float) -> bool:
+	for lane in road_lanes(d):
+		if absf(x - float(lane["c"])) <= float(lane["hw"]) - COL_HALF_W:
+			return true
+	return false
+
+
+func _nearest_lane_center(d: float, x: float) -> float:
+	var lanes := road_lanes(d)
+	var best := float(lanes[0]["c"])
+	for lane in lanes:
+		if absf(x - float(lane["c"])) < absf(x - best):
+			best = float(lane["c"])
+	return best
+
+
+func _clamp_to_nearest_lane(d: float, x: float) -> float:
+	var lanes := road_lanes(d)
+	var best: Dictionary = lanes[0]
+	for lane in lanes:
+		if absf(x - float(lane["c"])) < absf(x - float(best["c"])):
+			best = lane
+	var m := float(best["hw"]) - COL_HALF_W
+	return clampf(x, float(best["c"]) - m, float(best["c"]) + m)
+
+
+func _ensure_branches(up_to: float) -> void:
+	# scan forward in small steps; once we're past the spacing gate, drop a branch
+	# at the first stretch straight enough to make committing to a lane fair
+	while _branch_frontier_d < up_to:
+		_branch_frontier_d += 200.0
+		var d0 := _branch_frontier_d
+		if d0 < _next_branch_d:
+			continue
+		_ensure_track(d0 + 250.0)
+		if absf(road_center(d0 + 150.0) - road_center(d0 - 150.0)) > BRANCH_STRAIGHT_DELTA:
+			continue
+		var is_round := randf() < 0.4
+		var length := BRANCH_LEN_ROUND if is_round else BRANCH_LEN_FORK
+		# the whole feature's centerline must exist before the lanes reference it
+		_ensure_track(d0 + length + 300.0)
+		var off := ROUND_OFFSET if is_round else FORK_OFFSET
+		_branches.append({
+			"d0": d0, "d1": d0 + length,
+			"off": off, "hw": BRANCH_HW,
+			"kind": "round" if is_round else "fork",
+		})
+		var coin_side := 1.0 if randf() < 0.5 else -1.0
+		_seed_branch_coins(d0, d0 + length, off, coin_side)
+		_next_branch_d = d0 + length + BRANCH_SPACING
+
+
+# Line one of the two lanes with coins — the risk/reward payoff for leaving the
+# safe centerline and committing to a fork.
+func _seed_branch_coins(d0: float, d1: float, off: float, side: float) -> void:
+	for k in range(BRANCH_COINS):
+		var tt := lerpf(BRANCH_RAMP + 0.06, 1.0 - BRANCH_RAMP - 0.06, float(k) / float(BRANCH_COINS - 1))
+		var dd := lerpf(d0, d1, tt)
+		var cx := road_center(dd) + _branch_arch(tt) * off * side
+		_coins.append({ "d": dd, "x": cx, "got": false, "missed": false })
+
+
 func distance_at_row(y: float) -> float:
 	return distance + (CAR_Y - y)
 
@@ -1144,6 +1290,8 @@ func _ensure_coins(up_to: float) -> void:
 		if _coin_frontier_d < INTRO_DIST * 0.5:
 			continue
 		var d := _coin_frontier_d
+		if _in_branch(d):
+			continue   # branches seed their own coins along the scenic lane
 		var bc := road_center(d)
 		# reach is reduced on curves (where the road shifts across the coin's height)
 		var slope := absf(road_center(d + 30.0) - road_center(d - 30.0)) / 60.0
@@ -1194,36 +1342,7 @@ func _draw() -> void:
 	draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), col_offroad)
 	_draw_parallax()
 
-	var step := 3.0   # finer sampling keeps the polyline smooth through sharp turns
-	var left := PackedVector2Array()
-	var right := PackedVector2Array()
-	var centers: Array = []
-
-	var y := 0.0
-	while y <= SCREEN_H:
-		var d := distance_at_row(y)
-		var c := road_center(d)
-		var hw := road_half_width(d)
-		left.append(Vector2(_sx(c - hw), y))
-		right.append(Vector2(_sx(c + hw), y))
-		centers.append(Vector3(_sx(c), y, d))
-		y += step
-
-	var poly := PackedVector2Array()
-	poly.append_array(left)
-	for i in range(right.size() - 1, -1, -1):
-		poly.append(right[i])
-	draw_colored_polygon(poly, col_road)
-
-	draw_polyline(left, col_edge, 5.0, true)
-	draw_polyline(right, col_edge, 5.0, true)
-
-	# dashed center line as smooth strokes along the curve
-	for i in range(centers.size() - 1):
-		var p0: Vector3 = centers[i]
-		var p1: Vector3 = centers[i + 1]
-		if fposmod(p0.z, DASH_PERIOD) < DASH_PERIOD * 0.5:
-			draw_line(Vector2(p0.x, p0.y), Vector2(p1.x, p1.y), col_dash, 5.0, true)
+	_draw_road()
 
 	var in_game := state == State.PLAYING or state == State.CRASH or state == State.GAME_OVER or state == State.COUNTDOWN
 	if not in_game:
@@ -1341,6 +1460,105 @@ func _draw() -> void:
 		var f := clampf((_crash_timer - (CRASH_TIME - 0.15)) / 0.15, 0.0, 1.0)
 		if f > 0.0:
 			draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), Color(1, 1, 1, f * 0.6))
+
+
+# Draws the road surface, edges and centre dashes. Off branches it's one
+# continuous band (the common case, unchanged); on a branch it draws the two
+# split lanes and lets the off-road show through the gap as the island.
+func _draw_road() -> void:
+	var step := 3.0   # finer sampling keeps the polyline smooth through sharp turns
+	var bot_d := distance_at_row(SCREEN_H)
+	var top_d := distance_at_row(0.0)
+
+	var any_branch := false
+	for b in _branches:
+		if not (float(b["d1"]) < bot_d or float(b["d0"]) > top_d):
+			any_branch = true
+			break
+
+	if not any_branch:
+		var left := PackedVector2Array()
+		var right := PackedVector2Array()
+		var centers: Array = []
+		var y := 0.0
+		while y <= SCREEN_H:
+			var d := distance_at_row(y)
+			var c := road_center(d)
+			var hw := road_half_width(d)
+			left.append(Vector2(_sx(c - hw), y))
+			right.append(Vector2(_sx(c + hw), y))
+			centers.append(Vector3(_sx(c), y, d))
+			y += step
+		_fill_band(left, right)
+		draw_polyline(left, col_edge, 5.0, true)
+		draw_polyline(right, col_edge, 5.0, true)
+		_draw_dashes(centers)
+		return
+
+	# branch path: two lane bands. The gap between them is simply not painted, so
+	# the off-road underneath shows through as the island you steer around.
+	var l0 := PackedVector2Array()
+	var r0 := PackedVector2Array()
+	var l1 := PackedVector2Array()
+	var r1 := PackedVector2Array()
+	var cen0: Array = []
+	var cen1: Array = []
+	var yy := 0.0
+	while yy <= SCREEN_H:
+		var d := distance_at_row(yy)
+		var lanes := road_lanes(d)
+		var c0 := float(lanes[0]["c"])
+		var hw0 := float(lanes[0]["hw"])
+		var c1 := float(lanes[1]["c"])
+		var hw1 := float(lanes[1]["hw"])
+		l0.append(Vector2(_sx(c0 - hw0), yy))
+		r0.append(Vector2(_sx(c0 + hw0), yy))
+		l1.append(Vector2(_sx(c1 - hw1), yy))
+		r1.append(Vector2(_sx(c1 + hw1), yy))
+		cen0.append(Vector3(_sx(c0), yy, d))
+		cen1.append(Vector3(_sx(c1), yy, d))
+		yy += step
+	_fill_band(l0, r0)
+	_fill_band(l1, r1)
+	draw_polyline(l0, col_edge, 5.0, true)
+	draw_polyline(r0, col_edge, 5.0, true)
+	draw_polyline(l1, col_edge, 5.0, true)
+	draw_polyline(r1, col_edge, 5.0, true)
+	_draw_dashes(cen0)
+	_draw_dashes(cen1)
+	for b in _branches:
+		if b["kind"] == "round" and not (float(b["d1"]) < bot_d or float(b["d0"]) > top_d):
+			_draw_island(b)
+
+
+func _fill_band(left: PackedVector2Array, right: PackedVector2Array) -> void:
+	var poly := PackedVector2Array()
+	poly.append_array(left)
+	for i in range(right.size() - 1, -1, -1):
+		poly.append(right[i])
+	draw_colored_polygon(poly, col_road)
+
+
+func _draw_dashes(centers: Array) -> void:
+	for i in range(centers.size() - 1):
+		var p0: Vector3 = centers[i]
+		var p1: Vector3 = centers[i + 1]
+		if fposmod(p0.z, DASH_PERIOD) < DASH_PERIOD * 0.5:
+			draw_line(Vector2(p0.x, p0.y), Vector2(p1.x, p1.y), col_dash, 5.0, true)
+
+
+# The ring + hub that turns a wide fork into a recognisable roundabout island,
+# drawn in the centre of the gap at the widest point of the split.
+func _draw_island(b: Dictionary) -> void:
+	var gap_half := float(b["off"]) - float(b["hw"])
+	if gap_half <= 14.0:
+		return
+	var dc := (float(b["d0"]) + float(b["d1"])) * 0.5
+	var y := CAR_Y - (dc - distance)
+	var cx := _sx(road_center(dc))
+	var r := minf(gap_half - 10.0, 120.0)
+	draw_arc(Vector2(cx, y), r, 0.0, TAU, 48, col_edge, 4.0, true)
+	draw_circle(Vector2(cx, y), r * 0.4, col_edge)
 
 
 func _draw_parallax() -> void:
