@@ -206,8 +206,19 @@ var _count_timer := 0.0
 var _popups: Array = []
 var _ui_font: Font
 
+# ---------------- audio ----------------
+# Convention-based, like the art slots: drop a file at res://audio/<name>.ogg
+# (or .wav) and it plays automatically. Missing files are a silent no-op, so
+# the game runs identically with or without audio assets present.
+var _sfx_crash: AudioStreamPlayer
+var _sfx_coin: AudioStreamPlayer
+var _sfx_land: AudioStreamPlayer
+var _sfx_near_miss: AudioStreamPlayer
+var _sfx_ui: AudioStreamPlayer
+var _music_engine: AudioStreamPlayer
+
 var _micro_noise := FastNoiseLite.new()
-var _touch_down := false
+var _touch_ids: Dictionary = {}
 var _steer_armed := false
 var _run_started := false
 
@@ -237,6 +248,7 @@ func _ready() -> void:
 	_micro_noise.frequency = 0.01
 	_load_save()
 	_apply_theme(selected)
+	_build_audio()
 	_build_ui()
 	_goto_menu()
 
@@ -285,6 +297,42 @@ func _apply_theme(id: String) -> void:
 	col_dash = Color(t["dash"])
 	col_car = Color(t["car"])
 	col_car_dark = Color(t["car_dark"])
+
+
+# ============================================================
+#  AUDIO (convention-based; see slot comment above)
+# ============================================================
+const AUDIO_DIR := "res://audio/"
+
+func _load_sfx(name: String) -> AudioStream:
+	for ext in ["ogg", "wav", "mp3"]:
+		var path := "%s%s.%s" % [AUDIO_DIR, name, ext]
+		if ResourceLoader.exists(path):
+			return load(path)
+	return null
+
+
+func _make_player(name: String, bus: String, loop_volume_db: float) -> AudioStreamPlayer:
+	var p := AudioStreamPlayer.new()
+	p.stream = _load_sfx(name)
+	p.bus = bus
+	p.volume_db = loop_volume_db
+	add_child(p)
+	return p
+
+
+func _build_audio() -> void:
+	_sfx_crash = _make_player("crash", "Master", 0.0)
+	_sfx_coin = _make_player("coin", "Master", -4.0)
+	_sfx_land = _make_player("land", "Master", -2.0)
+	_sfx_near_miss = _make_player("near_miss", "Master", -2.0)
+	_sfx_ui = _make_player("ui_tap", "Master", -6.0)
+	_music_engine = _make_player("engine", "Master", -10.0)
+
+
+func _play_sfx(p: AudioStreamPlayer) -> void:
+	if p != null and p.stream != null:
+		p.play()
 
 
 # ============================================================
@@ -375,6 +423,7 @@ func _make_button(parent: Control, text: String, pos: Vector2, size: Vector2, fs
 	b.position = pos
 	b.size = size
 	b.add_theme_font_size_override("font_size", fsize)
+	b.pressed.connect(func(): _play_sfx(_sfx_ui))
 	parent.add_child(b)
 	return b
 
@@ -449,9 +498,10 @@ func _start_run() -> void:
 	_run_started = false
 	_apply_theme(selected)
 	_reset_world()
+	_music_engine.stop()
 	_ensure_track(distance + 1400.0)
-	_ensure_coins(distance + 1400.0)
 	_ensure_hazards(distance + 1400.0)
+	_ensure_coins(distance + 1400.0)
 	_hud_score.text = "0"
 	_hud_coins.text = "Coins: 0"
 	_hud_speed.text = ""
@@ -463,6 +513,7 @@ func _pause_game() -> void:
 	if state != State.PLAYING:
 		return
 	state = State.PAUSED
+	_music_engine.stream_paused = true
 	_show_screen()
 	queue_redraw()
 
@@ -472,6 +523,7 @@ func _resume() -> void:
 	_count_timer = COUNT_TIME
 	_steer_armed = false
 	_hud_prompt.visible = false
+	_music_engine.stream_paused = false
 	_show_screen()
 	queue_redraw()
 
@@ -483,6 +535,8 @@ func _crash() -> void:
 	_crash_timer = CRASH_TIME
 	Input.vibrate_handheld(220)
 	_spawn_explosion(_sx(car_x), CAR_Y)
+	_music_engine.stop()
+	_play_sfx(_sfx_crash)
 
 
 func _game_over() -> void:
@@ -579,11 +633,14 @@ func _evaluate_challenges() -> Array:
 # ============================================================
 func _input(event: InputEvent) -> void:
 	if event is InputEventScreenTouch:
-		_touch_down = event.pressed
+		if event.pressed:
+			_touch_ids[event.index] = true
+		else:
+			_touch_ids.erase(event.index)
 
 
 func _input_down() -> bool:
-	return _touch_down or Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) or Input.is_key_pressed(KEY_SPACE)
+	return not _touch_ids.is_empty() or Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) or Input.is_key_pressed(KEY_SPACE)
 
 
 func _steer_down() -> bool:
@@ -630,16 +687,19 @@ func _update_play(delta: float) -> void:
 		if down:
 			_run_started = true
 			_hud_prompt.visible = false
+			if _music_engine.stream != null:
+				_music_engine.play()
 		else:
 			camera_x = car_x
 			return
 
 	time_alive += delta
 	distance += current_speed() * delta
+	_music_engine.pitch_scale = clampf(current_speed() / BASE_SPEED, 0.7, 2.2)
 
 	_ensure_track(distance + 1400.0)
-	_ensure_coins(distance + 1400.0)
 	_ensure_hazards(distance + 1400.0)
+	_ensure_coins(distance + 1400.0)
 	_drop_old()
 
 	# camera follows the car (with a little look-ahead toward the upcoming road)
@@ -661,6 +721,7 @@ func _update_play(delta: float) -> void:
 			session_coins += JUMP_COINS
 			_boost_timer = BOOST_TIME
 			_add_popup(_sx(car_x), CAR_Y - 30.0, "+%d" % JUMP_COINS, true)
+			_play_sfx(_sfx_land)
 
 	if airborne:
 		car_x += lateral_velocity * delta
@@ -713,6 +774,7 @@ func _update_play(delta: float) -> void:
 				_streak_best = _streak
 			_no_coin_timer = 0.0
 			_add_popup(_sx(cx), CAR_Y - (cd - distance), "+1", true)
+			_play_sfx(_sfx_coin)
 		elif cd < distance - (COL_HALF_H + COIN_R) and not coin.get("missed", false):
 			coin["missed"] = true
 			_streak = 0
@@ -754,7 +816,7 @@ func _ensure_hazards(up_to: float) -> void:
 		if roll < 0.20:
 			var eff := BLOCK_W * 0.5 + COL_HALF_W
 			if 2.0 * bandh >= 2.0 * eff + GAP_MIN:
-				_hazards.append({ "d": d, "x": bc + _flush_side(bandh, eff), "type": "block", "lane": 0.0, "ang": 0.0, "hit": false })
+				_hazards.append({ "d": d, "x": bc + _flush_side(bandh, eff), "type": "block", "lane": 0.0, "ang": 0.0, "hit": false, "scored": false })
 		elif roll < 0.58:
 			var eff2 := TRAFFIC_W * 0.5 + COL_HALF_W
 			if 2.0 * bandh >= 2.0 * eff2 + GAP_MIN:
@@ -803,6 +865,12 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 			if not airborne and dy < COL_HALF_H + BLOCK_H * 0.5 and dx < COL_HALF_W + BLOCK_W * 0.5:
 				_crash()
 				return
+			# near miss: squeezed past a static block without crashing -> reward
+			if not h["scored"] and dy < COL_HALF_H + BLOCK_H * 0.5 + 20.0 and dx < NEAR_MISS_DX:
+				h["scored"] = true
+				session_coins += NEAR_MISS_COINS
+				_add_popup(_sx(car_x), CAR_Y - 60.0, "NEAR MISS +%d" % NEAR_MISS_COINS, false)
+				_play_sfx(_sfx_near_miss)
 		elif htype == "traffic":
 			if not airborne and dy < COL_HALF_H + TRAFFIC_H * 0.5 and dx < COL_HALF_W + TRAFFIC_W * 0.5:
 				_crash()
@@ -812,6 +880,7 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 				h["scored"] = true
 				session_coins += NEAR_MISS_COINS
 				_add_popup(_sx(car_x), CAR_Y - 60.0, "NEAR MISS +%d" % NEAR_MISS_COINS, false)
+				_play_sfx(_sfx_near_miss)
 		elif htype == "oil":
 			if not h["hit"] and dy < OIL_R and dx < OIL_R:
 				h["hit"] = true
@@ -1081,7 +1150,37 @@ func _ensure_coins(up_to: float) -> void:
 		var curve_fade := clampf(1.0 - slope, 0.45, 1.0)
 		var reach := (road_half_width(d) - COL_HALF_W - COIN_R) * 0.8 * curve_fade
 		var cx := bc + randf_range(-1.0, 1.0) * maxf(reach, 0.0)
+		if _coin_blocked(d, cx):
+			var alt := bc - (cx - bc)
+			if not _coin_blocked(d, alt):
+				cx = alt
+			else:
+				continue   # no clean spot here; skip rather than place an unfair coin
 		_coins.append({ "d": d, "x": cx, "got": false, "missed": false })
+
+
+# True if a coin at (d, x) would sit on/inside a stationary hazard's footprint
+# (block/oil/jump). Traffic is excluded: it moves, so grabbing a coin near a
+# lane it might pass through is normal risk/reward, not an unfair placement.
+func _coin_blocked(d: float, x: float) -> bool:
+	for h in _hazards:
+		var htype: String = h["type"]
+		var half_w: float
+		var half_h: float
+		if htype == "block":
+			half_w = BLOCK_W * 0.5
+			half_h = BLOCK_H * 0.5
+		elif htype == "oil":
+			half_w = OIL_R
+			half_h = OIL_R
+		elif htype == "jump":
+			half_w = JUMP_W * 0.5
+			half_h = JUMP_H * 0.5
+		else:
+			continue
+		if absf(float(h["d"]) - d) < half_h + COIN_R and absf(float(h["x"]) - x) < half_w + COIN_R:
+			return true
+	return false
 
 
 # ============================================================
@@ -1095,7 +1194,7 @@ func _draw() -> void:
 	draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), col_offroad)
 	_draw_parallax()
 
-	var step := 6.0
+	var step := 3.0   # finer sampling keeps the polyline smooth through sharp turns
 	var left := PackedVector2Array()
 	var right := PackedVector2Array()
 	var centers: Array = []
