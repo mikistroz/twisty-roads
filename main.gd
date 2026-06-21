@@ -90,6 +90,30 @@ const BRANCH_MAX_DRIFT := 280.0   # max sideways drift of the road across a fork
 const FORK_CHEVRON_PERIOD := 110.0   # distance between the median hazard chevrons
 const BRANCH_COINS := 4           # coins seeded along the scenic lane
 
+# Fork variety: a branch picks a STYLE and randomises its geometry so no two read
+# the same. The two lanes of a fork are described independently now (their own
+# separation, width and split-ramp), so a fork can be a clean mirror split or a
+# lopsided one (a fat lane beside a thin one). Length varies too — a longer fork
+# only peels more gently, so it stays within the sweep cap and is always fair.
+const FORK_LEN_VARY_MAX := 1.85   # fork length multiplier (>=1 keeps peel within the sweep cap)
+const FORK_OFF_VARY := 0.30       # +/- fraction jittered onto each lane's separation
+const FORK_HW_VARY := 0.22        # +/- fraction jittered onto each lane's half-width
+const FORK_RAMP_VARY := 0.45      # +/- fraction jittered onto each lane's split ramp
+const FORK_ASYM_CHANCE := 0.5     # chance a fork is lopsided rather than mirror-symmetric
+const SHOULDER_CHANCE := 0.4      # chance a branch is a bailout shoulder instead of a fork
+
+# Bailout shoulder: the main road stays full width and a narrower coin lane
+# sprouts from ONE shoulder, bulges out around a grass median, then merges back —
+# an optional scenic/greedy detour rather than a commit-to-a-lane fork.
+const SHOULDER_HW_MIN := 70.0
+const SHOULDER_HW_FRAC := 0.5     # shoulder half-width as a fraction of the road
+const SHOULDER_BULGE_MIN := 130.0 # how far the shoulder's far edge sits beyond the road edge
+const SHOULDER_BULGE_FRAC := 1.0  # bulge as a fraction of the road half-width
+const SHOULDER_RAMP := 0.3        # fraction of the shoulder spent sprouting / rejoining
+const SHOULDER_LEN_MIN := 1100.0
+const SHOULDER_LEN_VARY := 0.9    # +/- fraction jittered onto the shoulder length
+const SHOULDER_COINS := 5
+
 # ---------------- coins ----------------
 const COIN_SPACING := 1900.0
 const COIN_R := 15.0
@@ -115,6 +139,19 @@ const JUMP_H := 48.0
 const AIR_TIME := 0.6
 const TIRE_LIFE := 2.0
 
+# Jump-the-gap: a hole spans the WHOLE road and a full-width ramp is planted just
+# ahead of it, so the only way past is to launch off the ramp and sail over the
+# hole (the ramp is wider than the road, so staying on the road guarantees the
+# launch). Geometry is sized so the arc clears the hole even at base speed: the
+# launch fires COL_HALF_H + JUMP_H/2 (~60px) before the ramp, leaving ~114px of
+# air past it at base speed, so AHEAD + HALF + COL_HALF_H is kept well under that.
+const JUMP_GAP_CHANCE := 0.16     # share of (eligible) hazard rolls that become a jump-the-gap
+const JUMP_GAP_MIN_DIST := 3200.0 # only once the run is underway (speed has climbed; room to react)
+const JUMP_GAP_AHEAD := 44.0      # ramp-centre -> hole-centre distance
+const JUMP_GAP_HALF := 20.0       # half the hole's length along the road
+const JUMP_GAP_RUNWAY := 460.0    # clear road reserved past the hole for the landing (covers max-speed arc)
+const RAMP_GAP_INSET := 6.0       # ramp half-width = road half-width minus this
+
 const COL_BLOCK := Color("f4c20d")
 const COL_BLOCK_DARK := Color("141414")
 const COL_TRAFFIC := Color("e74c3c")
@@ -125,6 +162,8 @@ const COL_JUMP := Color("9aa7b8")
 const COL_JUMP_HI := Color("e8edf2")
 const COL_TIRE := Color(0.04, 0.04, 0.04, 1.0)
 const COL_EXHAUST := Color(0.72, 0.72, 0.78)
+const COL_GAP := Color("070708")          # the hole itself (reads as a void in the road)
+const COL_GAP_RIM := Color("f4c20d")      # hazard-striped lip on the near edge
 
 # ---------------- crash ----------------
 const CRASH_TIME := 1.0
@@ -890,6 +929,15 @@ func _ensure_hazards(up_to: float) -> void:
 		# only place where the road is roughly straight, so it's always avoidable
 		if absf(road_center(d + 50.0) - road_center(d - 50.0)) > STRAIGHT_DELTA:
 			continue
+		# jump-the-gap: a hole across the whole road that can only be cleared by
+		# launching off a ramp planted ahead of it. Rolled before the ordinary
+		# hazards because it claims a long stretch (ramp + hole + landing runway);
+		# if there isn't room it falls through to an ordinary hazard at this slot.
+		if d >= JUMP_GAP_MIN_DIST and randf() < JUMP_GAP_CHANCE:
+			var jf := _spawn_jump_gap(d)
+			if jf > 0.0:
+				_hazard_frontier_d = jf
+				continue
 		var bc := road_center(d)
 		var bandh := road_half_width(d) - COL_HALF_W
 		var roll := randf()
@@ -920,6 +968,30 @@ func _flush_side(bandh: float, eff: float) -> float:
 	if randf() < 0.5:
 		return bandh - eff
 	return -(bandh - eff)
+
+
+# Plant a jump-the-gap set: a full-width ramp at d, a hole spanning the whole road
+# just ahead, and a clear runway reserved past it for the landing. The ramp is
+# wider than the road, so simply staying on the road guarantees the launch; the
+# arc clears the hole even at base speed. Returns the distance the hazard frontier
+# should jump to so nothing else spawns in the landing zone, or -1.0 if no room.
+func _spawn_jump_gap(d: float) -> float:
+	var reserve := JUMP_GAP_AHEAD + JUMP_GAP_RUNWAY
+	_ensure_track(d + reserve + 50.0)
+	# the whole set (ramp, hole, landing) must sit on plain, branch-free road
+	if _in_branch(d) or _in_branch(d + JUMP_GAP_AHEAD) or _in_branch(d + reserve * 0.5) or _in_branch(d + reserve):
+		return -1.0
+	# you can't steer mid-air, so the landing zone must stay roughly aligned with
+	# the launch — only commit the set where the road ahead barely drifts
+	if absf(road_center(d + 280.0) - road_center(d)) > 90.0:
+		return -1.0
+	var hw := road_half_width(d)
+	_hazards.append({ "d": d, "x": road_center(d), "type": "jump", "w": 2.0 * (hw - RAMP_GAP_INSET), "h": JUMP_H, "lane": 0.0, "ang": 0.0, "hit": false, "gap_ramp": true })
+	var gd := d + JUMP_GAP_AHEAD
+	_hazards.append({ "d": gd, "x": road_center(gd), "type": "gap", "len": 2.0 * JUMP_GAP_HALF, "lane": 0.0, "ang": 0.0, "hit": false })
+	# keep upcoming branches out of the landing zone as well
+	_next_branch_d = maxf(_next_branch_d, d + reserve)
+	return d + reserve
 
 
 func _update_hazards(delta: float, airborne: bool) -> void:
@@ -973,10 +1045,17 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 				_oil_timer = OIL_TIME
 				_play_sfx(_sfx_oil)
 		elif htype == "jump":
-			if not h["hit"] and dy < COL_HALF_H + JUMP_H * 0.5 and dx < COL_HALF_W + JUMP_W * 0.5:
+			var jw: float = float(h.get("w", JUMP_W))
+			var jh: float = float(h.get("h", JUMP_H))
+			if not h["hit"] and dy < COL_HALF_H + jh * 0.5 and dx < COL_HALF_W + jw * 0.5:
 				h["hit"] = true
 				_air_timer = AIR_TIME
 				_play_sfx(_sfx_jump)
+		elif htype == "gap":
+			# a hole across the whole road: sail over it airborne, or fall in
+			if not airborne and dy < float(h["len"]) * 0.5 + COL_HALF_H:
+				_crash()
+				return
 
 
 # ============================================================
@@ -1215,15 +1294,38 @@ func road_lanes(d: float) -> Array[Dictionary]:
 	if b.is_empty():
 		var c := road_center(d)
 		return [{ "c": c, "hw": fullhw }, { "c": c, "hw": fullhw }]
+	# lane0 is always the LEFT lane and lane1 the RIGHT lane, so the two-lane road
+	# drawing (outer edges + median between them) keeps working for every style.
 	var axis := _branch_axis(b, d)                     # straightened reference line
-	var s := _branch_sep(b, d)                         # lane-center offset from the axis
-	var lane_hw := float(b["hw"])
-	# Narrow the split ONLY from the inside: each lane's outer edge holds at the
-	# road edge (axis ± fullhw) while the median opens, then the lane moves outward
-	# at its own width. Keeps outer edges from retreating (which used to clip a
-	# player at the edge) and stays seamless at both merge points (s≈0 → fullhw).
-	var hw := maxf(lane_hw, fullhw - s)
-	return [{ "c": axis - s, "hw": hw }, { "c": axis + s, "hw": hw }]
+	return [_lane_geom(b, b["lane0"], d, axis, fullhw), _lane_geom(b, b["lane1"], d, axis, fullhw)]
+
+
+# Geometry {c, hw} of one branch lane at distance d. Each lane carries its own
+# split schedule (t0..t1 + ramp) and shape, which is what lets a single branch be
+# a clean symmetric fork, a lopsided fork, or a one-sided bailout shoulder.
+func _lane_geom(b: Dictionary, lane: Dictionary, d: float, axis: float, fullhw: float) -> Dictionary:
+	# the full-width through lane of a bailout shoulder rides the road unchanged
+	if lane.get("main", false):
+		return { "c": axis, "hw": fullhw }
+	var span := float(b["d1"]) - float(b["d0"])
+	var t := (d - float(b["d0"])) / maxf(span, 1.0)
+	var t0 := float(lane["t0"])
+	var t1 := float(lane["t1"])
+	var u := clampf((t - t0) / maxf(t1 - t0, 0.0001), 0.0, 1.0)
+	var a := _branch_arch_ramped(u, float(lane["ramp"]))
+	var side := float(lane["side"])
+	if lane.get("shoulder", false):
+		# starts as the road's OUTER STRIP (a=0, overlapping the road so it's
+		# reachable from it) and translates outward to a bulge beyond the edge
+		# (a=1), at constant width — so the coin lane is always drivable and the
+		# road's outer boundary simply bulges out and back around it.
+		var sh := float(lane["hw"])
+		var reach := (fullhw - sh) + (float(lane["bulge"]) + sh) * a
+		return { "c": axis + side * reach, "hw": sh }
+	# fork lane: peels off the axis; widen-from-the-inside keeps the outer edge put
+	# (axis ± fullhw) while the median opens, so edges never retreat into the car.
+	var sep := a * float(lane["off"])
+	return { "c": axis + side * sep, "hw": maxf(float(lane["hw"]), fullhw - sep) }
 
 
 # The local reference line the branch's lanes ride on: it blends from the actual
@@ -1256,12 +1358,19 @@ func _branch_at(d: float) -> Dictionary:
 # smoothly to 1 across the middle (lanes fully split). This is what makes a fork
 # open out of, and close back into, a single road seamlessly.
 func _branch_arch(t: float) -> float:
+	return _branch_arch_ramped(t, BRANCH_RAMP)
+
+
+# Same 0→1→0 profile as _branch_arch but with a caller-supplied ramp fraction, so
+# each lane can open and close at its own pace (the source of varied fork shapes).
+func _branch_arch_ramped(t: float, ramp: float) -> float:
 	if t <= 0.0 or t >= 1.0:
 		return 0.0
-	if t < BRANCH_RAMP:
-		return smoothstep(0.0, 1.0, t / BRANCH_RAMP)
-	if t > 1.0 - BRANCH_RAMP:
-		return smoothstep(0.0, 1.0, (1.0 - t) / BRANCH_RAMP)
+	var r := clampf(ramp, 0.05, 0.5)
+	if t < r:
+		return smoothstep(0.0, 1.0, t / r)
+	if t > 1.0 - r:
+		return smoothstep(0.0, 1.0, (1.0 - t) / r)
 	return 1.0
 
 
@@ -1310,38 +1419,103 @@ func _ensure_branches(up_to: float) -> void:
 		_ensure_track(d0 + 250.0)
 		if absf(road_center(d0 + 150.0) - road_center(d0 - 150.0)) > BRANCH_STRAIGHT_DELTA:
 			continue
-		# geometry scales with the road's current width, so forks keep pace with the
-		# narrowing road instead of being a fixed (and eventually oversized) size
+		# geometry scales with the road's current width, so branches keep pace with
+		# the narrowing road instead of being a fixed (and eventually oversized) size.
+		# Style is rolled per branch so the forks vary instead of all reading the same.
 		var rhw := road_half_width(d0)
-		var lane_hw := clampf(rhw * LANE_FRAC, LANE_HW_MIN, rhw - 6.0)
-		var off := lane_hw + rhw * FORK_MEDIAN_FRAC
-		# length sized from a sweep cap so the lanes never peel apart faster than the
-		# car can track (smoothstep ramp peak slope = off*1.5/(len*RAMP))
-		var fork_len := maxf(FORK_LEN_MIN, off * 1.5 * MAX_SPEED * BOOST_MULT / (BRANCH_RAMP * FORK_SWEEP_CAP))
-		_ensure_track(d0 + fork_len + 200.0)
-		var b := { "d0": d0, "d1": d0 + fork_len, "hw": lane_hw, "off": off }
-		# the fork rides a straight chord, so only the road's NET drift across it
-		# matters — skip spots where that drift would make the chord too steep
+		var b := _make_shoulder(d0, rhw) if randf() < SHOULDER_CHANCE else _make_fork(d0, rhw)
 		var d1 := float(b["d1"])
+		_ensure_track(d1 + 200.0)
+		# the branch rides a straight chord, so only the road's NET drift across it
+		# matters — skip spots where that drift would make the chord too steep
 		if absf(road_center(d1) - road_center(d0)) > BRANCH_MAX_DRIFT:
 			continue
 		b["cx0"] = road_center(d0)
 		b["cx1"] = road_center(d1)
 		_branches.append(b)
-		var coin_side := 1.0 if randf() < 0.5 else -1.0
-		_seed_branch_coins(b, coin_side)
-		_next_branch_d = float(b["d1"]) + BRANCH_SPACING * randf_range(0.85, 1.25)
+		_seed_branch_coins(b)
+		_next_branch_d = d1 + BRANCH_SPACING * randf_range(0.85, 1.25)
 
 
-# Line the chosen lane with coins — the risk/reward payoff for leaving the safe
-# centerline and committing to a fork.
-func _seed_branch_coins(b: Dictionary, side: float) -> void:
+# A two-lane fork around a median. The two lanes are described INDEPENDENTLY, so a
+# fork can be a clean mirror split or lopsided (a fat lane beside a thin one), and
+# its length is stretched past the sweep-cap minimum by a random factor — so no
+# two forks peel apart the same way or for the same distance.
+func _make_fork(d0: float, rhw: float) -> Dictionary:
+	var asym := randf() < FORK_ASYM_CHANCE
+	var base_hw := clampf(rhw * LANE_FRAC, LANE_HW_MIN, rhw - 6.0)
+	var base_med := rhw * FORK_MEDIAN_FRAC
+	# per-lane jitter (a symmetric fork keeps both sides equal; a lopsided one does
+	# not). Each lane's separation is its own width PLUS a jittered median, so the
+	# grass gap between the lanes is always positive however the sides are jittered.
+	var hw_l := clampf(base_hw * (1.0 + (randf_range(-FORK_HW_VARY, FORK_HW_VARY) if asym else 0.0)), LANE_HW_MIN, rhw - 6.0)
+	var hw_r := clampf(base_hw * (1.0 + (randf_range(-FORK_HW_VARY, FORK_HW_VARY) if asym else 0.0)), LANE_HW_MIN, rhw - 6.0)
+	var med_l := maxf(base_med * (1.0 + (randf_range(-FORK_OFF_VARY, FORK_OFF_VARY) if asym else 0.0)), 8.0)
+	var med_r := maxf(base_med * (1.0 + (randf_range(-FORK_OFF_VARY, FORK_OFF_VARY) if asym else 0.0)), 8.0)
+	var off_l := hw_l + med_l
+	var off_r := hw_r + med_r
+	var ramp_l := BRANCH_RAMP * (1.0 + (randf_range(-FORK_RAMP_VARY, FORK_RAMP_VARY) if asym else 0.0))
+	var ramp_r := BRANCH_RAMP * (1.0 + (randf_range(-FORK_RAMP_VARY, FORK_RAMP_VARY) if asym else 0.0))
+	# length: keep even the widest, fastest-peeling lane within the sweep cap, then
+	# stretch it by a random factor (longer only ever peels more gently — still fair)
+	var max_off := maxf(off_l, off_r)
+	var min_ramp := clampf(minf(ramp_l, ramp_r), 0.05, 0.5)
+	var min_len := maxf(FORK_LEN_MIN, max_off * 1.5 * MAX_SPEED * BOOST_MULT / (min_ramp * FORK_SWEEP_CAP))
+	var fork_len := min_len * randf_range(1.0, FORK_LEN_VARY_MAX)
+	return {
+		"kind": "fork",
+		"d0": d0, "d1": d0 + fork_len, "off": max_off,
+		"lane0": { "side": -1.0, "off": off_l, "hw": hw_l, "t0": 0.0, "t1": 1.0, "ramp": ramp_l },
+		"lane1": { "side": 1.0, "off": off_r, "hw": hw_r, "t0": 0.0, "t1": 1.0, "ramp": ramp_r },
+		"coin_lane": 1 if randf() < 0.5 else 0,
+	}
+
+
+# A bailout shoulder: the main road stays full width (the through lane) while a
+# narrower coin lane sprouts from ONE shoulder, bulges out past the road edge
+# around a grass median, and rejoins. It's an optional reward detour, not a
+# commit-to-a-lane fork, so the safe line is always available.
+func _make_shoulder(d0: float, rhw: float) -> Dictionary:
+	var sh_hw := maxf(SHOULDER_HW_MIN, rhw * SHOULDER_HW_FRAC)
+	var bulge := maxf(SHOULDER_BULGE_MIN, rhw * SHOULDER_BULGE_FRAC)
+	var sh_len := SHOULDER_LEN_MIN * randf_range(1.0, 1.0 + SHOULDER_LEN_VARY)
+	# keep the shoulder's sideways speed within the sweep cap (it travels the full
+	# bulge + its own width as it moves from the road's edge out to the bulge)
+	sh_len = maxf(sh_len, (bulge + sh_hw) * 1.5 * MAX_SPEED * BOOST_MULT / (SHOULDER_RAMP * FORK_SWEEP_CAP))
+	var right := randf() < 0.5
+	var shoulder_lane := { "shoulder": true, "side": (1.0 if right else -1.0), "hw": sh_hw, "bulge": bulge, "t0": 0.0, "t1": 1.0, "ramp": SHOULDER_RAMP }
+	var main_lane := { "main": true }
+	var b := { "kind": "shoulder", "d0": d0, "d1": d0 + sh_len, "off": bulge }
+	# keep lane0 LEFT / lane1 RIGHT so the road drawing stays correct
+	if right:
+		b["lane0"] = main_lane
+		b["lane1"] = shoulder_lane
+		b["coin_lane"] = 1
+	else:
+		b["lane0"] = shoulder_lane
+		b["lane1"] = main_lane
+		b["coin_lane"] = 0
+	return b
+
+
+# Line the branch's coin lane with coins — the payoff for leaving the safe line:
+# the scenic side of a fork, or out along the bulge of a bailout shoulder.
+func _seed_branch_coins(b: Dictionary) -> void:
+	var lane: Dictionary = b["lane0"] if int(b["coin_lane"]) == 0 else b["lane1"]
+	if lane.get("main", false):
+		return
 	var d0 := float(b["d0"])
 	var d1 := float(b["d1"])
-	for k in range(BRANCH_COINS):
-		var dd := lerpf(d0, d1, lerpf(0.3, 0.7, float(k) / float(BRANCH_COINS - 1)))
-		var cx := _branch_axis(b, dd) + side * _branch_sep(b, dd)
-		_coins.append({ "d": dd, "x": cx, "got": false, "missed": false })
+	var n: int = SHOULDER_COINS if String(b.get("kind", "fork")) == "shoulder" else BRANCH_COINS
+	var t0 := float(lane["t0"])
+	var t1 := float(lane["t1"])
+	for k in range(n):
+		# spread across the lane's active window, where it has actually peeled out
+		var f := lerpf(0.28, 0.72, float(k) / float(maxi(n - 1, 1)))
+		var dd := lerpf(d0, d1, lerpf(t0, t1, f))
+		var axis := _branch_axis(b, dd)
+		var g := _lane_geom(b, lane, dd, axis, road_half_width(dd))
+		_coins.append({ "d": dd, "x": float(g["c"]), "got": false, "missed": false })
 
 
 func distance_at_row(y: float) -> float:
@@ -1393,8 +1567,12 @@ func _coin_blocked(d: float, x: float) -> bool:
 			half_w = OIL_R
 			half_h = OIL_R
 		elif htype == "jump":
-			half_w = JUMP_W * 0.5
-			half_h = JUMP_H * 0.5
+			half_w = float(h.get("w", JUMP_W)) * 0.5
+			half_h = float(h.get("h", JUMP_H)) * 0.5
+		elif htype == "gap":
+			# the hole spans the whole road, so block any coin within its length
+			half_w = road_half_width(d) + COIN_R
+			half_h = float(h["len"]) * 0.5
 		else:
 			continue
 		if absf(float(h["d"]) - d) < half_h + COIN_R and absf(float(h["x"]) - x) < half_w + COIN_R:
@@ -1507,14 +1685,22 @@ func _draw() -> void:
 			draw_rect(Rect2(-TRAFFIC_W * 0.5 + 8.0, TRAFFIC_H * 0.5 - 48.0, TRAFFIC_W - 16.0, 30.0), COL_TRAFFIC_DARK)
 			draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 		elif ht == "jump":
+			var jw: float = float(h.get("w", JUMP_W))
+			var jh: float = float(h.get("h", JUMP_H))
 			var ramp := PackedVector2Array()
-			ramp.append(Vector2(hx - JUMP_W * 0.5, hy + JUMP_H * 0.5))
-			ramp.append(Vector2(hx + JUMP_W * 0.5, hy + JUMP_H * 0.5))
-			ramp.append(Vector2(hx + JUMP_W * 0.35, hy - JUMP_H * 0.5))
-			ramp.append(Vector2(hx - JUMP_W * 0.35, hy - JUMP_H * 0.5))
+			ramp.append(Vector2(hx - jw * 0.5, hy + jh * 0.5))
+			ramp.append(Vector2(hx + jw * 0.5, hy + jh * 0.5))
+			ramp.append(Vector2(hx + jw * 0.35, hy - jh * 0.5))
+			ramp.append(Vector2(hx - jw * 0.35, hy - jh * 0.5))
 			draw_colored_polygon(ramp, COL_JUMP)
-			draw_line(Vector2(hx - 24.0, hy + 10.0), Vector2(hx, hy - 12.0), COL_JUMP_HI, 4.0)
-			draw_line(Vector2(hx + 24.0, hy + 10.0), Vector2(hx, hy - 12.0), COL_JUMP_HI, 4.0)
+			# launch chevrons across the ramp (a wide gap ramp gets several)
+			var chev := maxi(1, int(jw / 70.0))
+			for c in range(chev):
+				var cxr := hx - jw * 0.5 + jw * (float(c) + 0.5) / float(chev)
+				draw_line(Vector2(cxr - 24.0, hy + 10.0), Vector2(cxr, hy - 12.0), COL_JUMP_HI, 4.0)
+				draw_line(Vector2(cxr + 24.0, hy + 10.0), Vector2(cxr, hy - 12.0), COL_JUMP_HI, 4.0)
+		elif ht == "gap":
+			_draw_gap(h, hd)
 
 	for coin in _coins:
 		if coin["got"]:
@@ -1602,6 +1788,44 @@ func _draw() -> void:
 		var f := clampf((_crash_timer - (CRASH_TIME - 0.15)) / 0.15, 0.0, 1.0)
 		if f > 0.0:
 			draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), Color(1, 1, 1, f * 0.6))
+
+
+# The jump-the-gap hole: a void that follows the road across its length, with a
+# hazard-striped lip on the near edge so it reads as "ramp over this, don't drive in".
+func _draw_gap(h: Dictionary, hd: float) -> void:
+	var glen: float = float(h["len"])
+	var g0 := hd - glen * 0.5
+	var g1 := hd + glen * 0.5
+	var left := PackedVector2Array()
+	var right := PackedVector2Array()
+	var dd := g0
+	while dd <= g1 + 0.01:
+		var c := road_center(dd)
+		var hwd := road_half_width(dd)
+		var yy := CAR_Y - (dd - distance)
+		left.append(Vector2(_sx(c - hwd), yy))
+		right.append(Vector2(_sx(c + hwd), yy))
+		dd += 6.0
+	var poly := PackedVector2Array()
+	poly.append_array(left)
+	for ri in range(right.size() - 1, -1, -1):
+		poly.append(right[ri])
+	if poly.size() >= 3:
+		draw_colored_polygon(poly, COL_GAP)
+	# striped lip on the NEAR edge (closest to the car = the larger-y, g0 end)
+	var nc := road_center(g0)
+	var nhw := road_half_width(g0)
+	var lx := _sx(nc - nhw)
+	var rx := _sx(nc + nhw)
+	var ny := CAR_Y - (g0 - distance)
+	var sw := 22.0
+	var x := lx
+	var on := true
+	while x < rx:
+		if on:
+			draw_rect(Rect2(x, ny - 4.0, minf(sw, rx - x), 8.0), COL_GAP_RIM)
+		on = not on
+		x += sw
 
 
 # Draws the road surface, edges and centre dashes. Off branches it's one
