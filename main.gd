@@ -30,7 +30,7 @@ const GRID := 110.0               # parallax ground grid spacing
 
 # ---------------- difficulty ----------------
 const BASE_SPEED := 290.0
-const SPEED_PER_SEC := 0.65
+const SPEED_PER_SEC := 1.8        # climbs to MAX over ~2 min, so acceleration is actually felt
 const MAX_SPEED := 520.0
 const START_HALF_WIDTH := 200.0
 const MIN_HALF_WIDTH := 120.0
@@ -70,6 +70,25 @@ const MAX_TILT := 0.45
 # ---------------- road shape ----------------
 const MICRO_AMP := 0.0            # 0 = perfectly smooth edges
 const DASH_PERIOD := 90.0
+
+# ---------------- forks ----------------
+# road_center/road_half_width describe ONE continuous centerline. A "fork"
+# turns a straight stretch into two lanes (symmetric about a straightened chord)
+# that separate around a grass median and then merge back — pick a lane, grab
+# the coins, rejoin. Forks are the multi-lane "segments" layered on top of the
+# centerline, which is what lets the road split without the centerline having to
+# be multi-valued.
+const BRANCH_SPACING := 7000.0    # min gap between one fork ending and the next starting
+const FORK_LEN_MIN := 1300.0
+const BRANCH_RAMP := 0.22         # fraction of a fork's length spent splitting / merging
+const LANE_FRAC := 0.62           # split-lane half-width as a fraction of the local road
+const LANE_HW_MIN := 76.0
+const FORK_MEDIAN_FRAC := 0.2     # fork median half-width as a fraction of the local road
+const FORK_SWEEP_CAP := 460.0     # how fast the lanes may peel apart (the wide lanes absorb it)
+const BRANCH_STRAIGHT_DELTA := 70.0  # entry must be at least this straight (per 300px)
+const BRANCH_MAX_DRIFT := 280.0   # max sideways drift of the road across a fork (chord stays gentle)
+const FORK_CHEVRON_PERIOD := 110.0   # distance between the median hazard chevrons
+const BRANCH_COINS := 4           # coins seeded along the scenic lane
 
 # ---------------- coins ----------------
 const COIN_SPACING := 1900.0
@@ -111,6 +130,18 @@ const COL_EXHAUST := Color(0.72, 0.72, 0.78)
 const CRASH_TIME := 1.0
 const COL_SPEED_MAX := Color("ff5a5f")
 const COL_SPEED := Color("e8e8e8")
+
+# ---------------- speedometer gauge ----------------
+const GAUGE_CENTER := Vector2(118.0, 156.0)
+const GAUGE_R := 84.0
+const GAUGE_START_DEG := 140.0
+const GAUGE_END_DEG := 400.0
+const GAUGE_MIN_KMH := 90.0       # dial floor (just below start speed) so the needle has room to climb
+const GAUGE_MAX_KMH := 340.0      # ~MAX_SPEED * BOOST_MULT converted to km/h
+const COL_GAUGE_BG := Color(0, 0, 0, 0.35)
+const COL_GAUGE_RING := Color(1, 1, 1, 0.25)
+const COL_GAUGE_TICK := Color(1, 1, 1, 0.4)
+const COL_GAUGE_REDZONE := Color("ff5a5f")
 
 # ---------------- save ----------------
 const SAVE_PATH := "user://twisty_roads.cfg"
@@ -190,6 +221,11 @@ var _track_last_x := ROAD_CENTER_X
 var _bias := 0.0
 var _pattern_queue: Array = []
 
+# forks layered on the centerline (see FORKS section)
+var _branches: Array[Dictionary] = []
+var _branch_frontier_d := 0.0
+var _next_branch_d := 0.0          # earliest distance the next branch may start
+
 var _coins: Array = []
 var _coin_frontier_d := 0.0
 var _hazards: Array = []
@@ -208,14 +244,25 @@ var _ui_font: Font
 
 # ---------------- audio ----------------
 # Convention-based, like the art slots: drop a file at res://audio/<name>.ogg
-# (or .wav) and it plays automatically. Missing files are a silent no-op, so
-# the game runs identically with or without audio assets present.
+# (or .wav/.mp3) and it plays automatically. Missing files are a silent no-op,
+# so the game runs identically with or without audio assets present.
+# Engine is two crossfaded loops (engine_low/engine_high) rather than one
+# loop with a wide pitch shift, so going fast changes the engine's timbre
+# instead of just speeding up its pitch — avoids the droney/chipmunk effect.
+# Expected slots: crash, coin, land, near_miss, jump, oil_squeal, horn,
+# purchase, challenge, ui_tap, engine_low, engine_high.
 var _sfx_crash: AudioStreamPlayer
 var _sfx_coin: AudioStreamPlayer
 var _sfx_land: AudioStreamPlayer
 var _sfx_near_miss: AudioStreamPlayer
+var _sfx_jump: AudioStreamPlayer
+var _sfx_oil: AudioStreamPlayer
+var _sfx_beep: AudioStreamPlayer
+var _sfx_purchase: AudioStreamPlayer
+var _sfx_challenge: AudioStreamPlayer
 var _sfx_ui: AudioStreamPlayer
-var _music_engine: AudioStreamPlayer
+var _engine_low: AudioStreamPlayer
+var _engine_high: AudioStreamPlayer
 
 var _micro_noise := FastNoiseLite.new()
 var _touch_ids: Dictionary = {}
@@ -235,7 +282,6 @@ var _theme_buttons := {}
 var _challenge_labels: Array = []
 var _hud_score: Label
 var _hud_coins: Label
-var _hud_speed: Label
 var _hud_prompt: Label
 var _go_score: Label
 var _go_coins: Label
@@ -326,13 +372,30 @@ func _build_audio() -> void:
 	_sfx_coin = _make_player("coin", "Master", -4.0)
 	_sfx_land = _make_player("land", "Master", -2.0)
 	_sfx_near_miss = _make_player("near_miss", "Master", -2.0)
+	_sfx_jump = _make_player("jump", "Master", -2.0)
+	_sfx_oil = _make_player("oil_squeal", "Master", -3.0)
+	_sfx_beep = _make_player("horn", "Master", -6.0)
+	_sfx_purchase = _make_player("purchase", "Master", -3.0)
+	_sfx_challenge = _make_player("challenge", "Master", -2.0)
 	_sfx_ui = _make_player("ui_tap", "Master", -6.0)
-	_music_engine = _make_player("engine", "Master", -10.0)
+	_engine_low = _make_player("engine_low", "Master", -10.0)
+	_engine_high = _make_player("engine_high", "Master", -10.0)
 
 
 func _play_sfx(p: AudioStreamPlayer) -> void:
 	if p != null and p.stream != null:
 		p.play()
+
+
+# Crossfades two engine loops by speed instead of pitch-shifting one loop
+# across a wide range, so the engine note changes character rather than
+# turning into an irritating chipmunk/drone at the extremes.
+func _update_engine_audio() -> void:
+	var frac := clampf((current_speed() - BASE_SPEED) / (MAX_SPEED * BOOST_MULT - BASE_SPEED), 0.0, 1.0)
+	_engine_low.volume_db = lerpf(-6.0, -26.0, frac)
+	_engine_high.volume_db = lerpf(-26.0, -6.0, frac)
+	_engine_low.pitch_scale = lerpf(0.85, 1.15, frac)
+	_engine_high.pitch_scale = lerpf(0.95, 1.25, frac)
 
 
 # ============================================================
@@ -374,8 +437,6 @@ func _build_ui() -> void:
 	_hud = _make_panel(layer)
 	_hud_score = _make_label(_hud, "0", Vector2(0, 36), Vector2(SCREEN_W, 80), 64)
 	_hud_coins = _make_label(_hud, "Coins: 0", Vector2(0, 124), Vector2(SCREEN_W, 50), 34)
-	_hud_speed = _make_label(_hud, "", Vector2(20, 40), Vector2(280, 50), 30)
-	_hud_speed.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	_hud_prompt = _make_label(_hud, "Tap to begin\nHold to steer", Vector2(0, 540), Vector2(SCREEN_W, 200), 52)
 	_make_button(_hud, "II", Vector2(600, 30), Vector2(96, 72), 40).pressed.connect(_pause_game)
 
@@ -461,6 +522,9 @@ func _reset_world() -> void:
 	_pattern_queue.clear()
 	_coin_frontier_d = 0.0
 	_hazard_frontier_d = 0.0
+	_branches.clear()
+	_branch_frontier_d = 0.0
+	_next_branch_d = INTRO_DIST + 1200.0
 	_streak = 0
 	_streak_best = 0
 	_no_coin_timer = 0.0
@@ -498,13 +562,14 @@ func _start_run() -> void:
 	_run_started = false
 	_apply_theme(selected)
 	_reset_world()
-	_music_engine.stop()
+	_engine_low.stop()
+	_engine_high.stop()
 	_ensure_track(distance + 1400.0)
+	_ensure_branches(distance + 1400.0)
 	_ensure_hazards(distance + 1400.0)
 	_ensure_coins(distance + 1400.0)
 	_hud_score.text = "0"
 	_hud_coins.text = "Coins: 0"
-	_hud_speed.text = ""
 	_hud_prompt.visible = true
 	_show_screen()
 
@@ -513,7 +578,8 @@ func _pause_game() -> void:
 	if state != State.PLAYING:
 		return
 	state = State.PAUSED
-	_music_engine.stream_paused = true
+	_engine_low.stream_paused = true
+	_engine_high.stream_paused = true
 	_show_screen()
 	queue_redraw()
 
@@ -523,7 +589,8 @@ func _resume() -> void:
 	_count_timer = COUNT_TIME
 	_steer_armed = false
 	_hud_prompt.visible = false
-	_music_engine.stream_paused = false
+	_engine_low.stream_paused = false
+	_engine_high.stream_paused = false
 	_show_screen()
 	queue_redraw()
 
@@ -535,7 +602,8 @@ func _crash() -> void:
 	_crash_timer = CRASH_TIME
 	Input.vibrate_handheld(220)
 	_spawn_explosion(_sx(car_x), CAR_Y)
-	_music_engine.stop()
+	_engine_low.stop()
+	_engine_high.stop()
 	_play_sfx(_sfx_crash)
 
 
@@ -564,6 +632,7 @@ func _game_over() -> void:
 			bonus += int(ch["reward"])
 			names.append(str(ch["desc"]))
 		_go_challenge.text = "Challenge complete! +%d coins\n%s" % [bonus, ", ".join(names)]
+		_play_sfx(_sfx_challenge)
 	_show_screen()
 
 
@@ -580,6 +649,7 @@ func _on_theme_pressed(id: String) -> void:
 			selected = id
 			_apply_theme(id)
 			_save()
+			_play_sfx(_sfx_purchase)
 	_refresh_store()
 	queue_redraw()
 
@@ -687,23 +757,26 @@ func _update_play(delta: float) -> void:
 		if down:
 			_run_started = true
 			_hud_prompt.visible = false
-			if _music_engine.stream != null:
-				_music_engine.play()
+			if _engine_low.stream != null:
+				_engine_low.play()
+			if _engine_high.stream != null:
+				_engine_high.play()
 		else:
 			camera_x = car_x
 			return
 
 	time_alive += delta
 	distance += current_speed() * delta
-	_music_engine.pitch_scale = clampf(current_speed() / BASE_SPEED, 0.7, 2.2)
+	_update_engine_audio()
 
 	_ensure_track(distance + 1400.0)
+	_ensure_branches(distance + 1400.0)
 	_ensure_hazards(distance + 1400.0)
 	_ensure_coins(distance + 1400.0)
 	_drop_old()
 
 	# camera follows the car (with a little look-ahead toward the upcoming road)
-	var look := road_center(distance + CAM_LOOKAHEAD)
+	var look := _nearest_lane_center(distance + CAM_LOOKAHEAD, car_x)
 	var cam_target := lerpf(car_x, look, CAM_LOOK_W)
 	camera_x = lerpf(camera_x, cam_target, clampf(CAM_FOLLOW * delta, 0.0, 1.0))
 	camera_x = clampf(camera_x, car_x - CAM_MAX_OFF, car_x + CAM_MAX_OFF)
@@ -747,18 +820,14 @@ func _update_play(delta: float) -> void:
 	if _no_coin_timer > _no_coin_best:
 		_no_coin_best = _no_coin_timer
 
-	if not airborne:
-		var c := road_center(distance)
-		var hw := road_half_width(distance)
-		if absf(car_x - c) > hw - COL_HALF_W:
-			_crash()
-			return
+	if not airborne and not _on_any_lane(distance, car_x):
+		_crash()
+		return
 
 	_update_hazards(delta, airborne)
 	if state != State.PLAYING:
 		return
 
-	_update_speedometer()
 	_update_popups(delta)
 
 	for coin in _coins:
@@ -788,13 +857,22 @@ func _drop_old() -> void:
 	while _pt_d.size() > 2 and _pt_d[1] < distance - 500.0:
 		_pt_d.remove_at(0)
 		_pt_x.remove_at(0)
-	while _coins.size() > 0 and float(_coins[0]["d"]) < distance - 500.0:
-		_coins.remove_at(0)
+	# coins can be seeded out of distance-order (branch coins), so scan all
+	var ci := _coins.size() - 1
+	while ci >= 0:
+		if float(_coins[ci]["d"]) < distance - 500.0:
+			_coins.remove_at(ci)
+		ci -= 1
 	var i := _hazards.size() - 1
 	while i >= 0:
 		if float(_hazards[i]["d"]) < distance - 600.0:
 			_hazards.remove_at(i)
 		i -= 1
+	var bi := _branches.size() - 1
+	while bi >= 0:
+		if float(_branches[bi]["d1"]) < distance - 700.0:
+			_branches.remove_at(bi)
+		bi -= 1
 
 
 # ============================================================
@@ -807,6 +885,8 @@ func _ensure_hazards(up_to: float) -> void:
 		var d := _hazard_frontier_d
 		if d < INTRO_DIST:
 			continue
+		if _in_branch(d):
+			continue   # the fork itself is the challenge here
 		# only place where the road is roughly straight, so it's always avoidable
 		if absf(road_center(d + 50.0) - road_center(d - 50.0)) > STRAIGHT_DELTA:
 			continue
@@ -853,8 +933,8 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 			var tgt := road_center(td) + float(h["lane"]) * hwt
 			var oldx := float(h["x"])
 			var nx := move_toward(oldx, tgt, TRAFFIC_LAT_SPEED * delta)
-			# never let it drift off the road, even on a sharp curve
-			nx = clampf(nx, road_center(td) - (hwt - COL_HALF_W), road_center(td) + (hwt - COL_HALF_W))
+			# keep it on an actual lane (matters through forks)
+			nx = _clamp_to_nearest_lane(td, nx)
 			h["x"] = nx
 			h["ang"] = clampf((nx - oldx) / maxf(TRAFFIC_LAT_SPEED * delta, 0.001), -1.0, 1.0) * 0.4
 		var hd := float(h["d"])
@@ -869,7 +949,7 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 			if not h["scored"] and dy < COL_HALF_H + BLOCK_H * 0.5 + 20.0 and dx < NEAR_MISS_DX:
 				h["scored"] = true
 				session_coins += NEAR_MISS_COINS
-				_add_popup(_sx(car_x), CAR_Y - 60.0, "NEAR MISS +%d" % NEAR_MISS_COINS, false)
+				_add_popup(_sx(car_x), CAR_Y - 60.0, "Near Miss! +%d" % NEAR_MISS_COINS, true, 220.0, true)
 				_play_sfx(_sfx_near_miss)
 		elif htype == "traffic":
 			if not airborne and dy < COL_HALF_H + TRAFFIC_H * 0.5 and dx < COL_HALF_W + TRAFFIC_W * 0.5:
@@ -879,16 +959,24 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 			if not h["scored"] and dy < COL_HALF_H + 20.0 and dx < NEAR_MISS_DX:
 				h["scored"] = true
 				session_coins += NEAR_MISS_COINS
-				_add_popup(_sx(car_x), CAR_Y - 60.0, "NEAR MISS +%d" % NEAR_MISS_COINS, false)
+				_add_popup(_sx(car_x), CAR_Y - 60.0, "Near Miss! +%d" % NEAR_MISS_COINS, true, 220.0, true)
 				_play_sfx(_sfx_near_miss)
+			# random oncoming horn while the car is on screen ahead/behind
+			var bt: float = float(h.get("beep_t", randf_range(0.8, 2.4))) - delta
+			if bt <= 0.0 and dy < 650.0:
+				bt = randf_range(1.6, 3.6)
+				_play_sfx(_sfx_beep)
+			h["beep_t"] = bt
 		elif htype == "oil":
 			if not h["hit"] and dy < OIL_R and dx < OIL_R:
 				h["hit"] = true
 				_oil_timer = OIL_TIME
+				_play_sfx(_sfx_oil)
 		elif htype == "jump":
 			if not h["hit"] and dy < COL_HALF_H + JUMP_H * 0.5 and dx < COL_HALF_W + JUMP_W * 0.5:
 				h["hit"] = true
 				_air_timer = AIR_TIME
+				_play_sfx(_sfx_jump)
 
 
 # ============================================================
@@ -957,8 +1045,8 @@ func _update_tire_marks(delta: float) -> void:
 		i -= 1
 
 
-func _add_popup(sx_pos: float, sy_pos: float, text: String, coin: bool) -> void:
-	_popups.append({ "pos": Vector2(sx_pos, sy_pos), "text": text, "age": 0.0, "coin": coin })
+func _add_popup(sx_pos: float, sy_pos: float, text: String, coin: bool, width: float = 160.0, inline: bool = false) -> void:
+	_popups.append({ "pos": Vector2(sx_pos, sy_pos), "text": text, "age": 0.0, "coin": coin, "width": width, "inline": inline })
 
 
 func _update_popups(delta: float) -> void:
@@ -1003,19 +1091,6 @@ func _dist_km() -> float:
 func road_half_width(d: float) -> float:
 	var base := clampf(START_HALF_WIDTH - d * NARROW_PER_DIST, MIN_HALF_WIDTH, START_HALF_WIDTH)
 	return base + _breather(d) * RHYTHM_WIDTH_AMP
-
-
-func _update_speedometer() -> void:
-	var kmh := int(current_speed() / PX_PER_METER * 3.6)
-	if _ramp_speed() >= MAX_SPEED - 0.5:
-		_hud_speed.text = "MAX  %d KM/H" % kmh
-		_hud_speed.add_theme_color_override("font_color", COL_SPEED_MAX)
-	elif _boost_timer > 0.0:
-		_hud_speed.text = "BOOST  %d KM/H" % kmh
-		_hud_speed.add_theme_color_override("font_color", COL_BOOST)
-	else:
-		_hud_speed.text = "%d KM/H" % kmh
-		_hud_speed.add_theme_color_override("font_color", COL_SPEED)
 
 
 func _turn_factor() -> float:
@@ -1127,6 +1202,148 @@ func road_center(d: float) -> float:
 	return _pt_x[n - 1]
 
 
+# ============================================================
+#  FORKS (two lanes around a median, layered on the centerline)
+# ============================================================
+# road_lanes() is the multi-lane view the rest of the game queries. Normally it
+# returns one lane twice (the plain road); inside a branch it returns the two
+# split lanes. road_center()/road_half_width() stay the single continuous
+# centerline the branches ride on.
+func road_lanes(d: float) -> Array[Dictionary]:
+	var fullhw := road_half_width(d)
+	var b := _branch_at(d)
+	if b.is_empty():
+		var c := road_center(d)
+		return [{ "c": c, "hw": fullhw }, { "c": c, "hw": fullhw }]
+	var axis := _branch_axis(b, d)                     # straightened reference line
+	var s := _branch_sep(b, d)                         # lane-center offset from the axis
+	var lane_hw := float(b["hw"])
+	# Narrow the split ONLY from the inside: each lane's outer edge holds at the
+	# road edge (axis ± fullhw) while the median opens, then the lane moves outward
+	# at its own width. Keeps outer edges from retreating (which used to clip a
+	# player at the edge) and stays seamless at both merge points (s≈0 → fullhw).
+	var hw := maxf(lane_hw, fullhw - s)
+	return [{ "c": axis - s, "hw": hw }, { "c": axis + s, "hw": hw }]
+
+
+# The local reference line the branch's lanes ride on: it blends from the actual
+# (possibly curving) centerline at the merge points to a straight chord across
+# the middle, in step with how far the lanes have separated — so a thin split
+# lane is never dragged sideways by a bend in the underlying road.
+func _branch_axis(b: Dictionary, d: float) -> float:
+	var d0 := float(b["d0"])
+	var t := (d - d0) / (float(b["d1"]) - d0)
+	var chord := lerpf(float(b["cx0"]), float(b["cx1"]), t)
+	var frac := clampf(_branch_sep(b, d) / maxf(float(b["off"]), 1.0), 0.0, 1.0)
+	return lerpf(road_center(d), chord, frac)
+
+
+# Lane-center offset from the axis at distance d: the smoothstep arch ramps the
+# lanes out to a flat parallel split across the middle, then back together.
+func _branch_sep(b: Dictionary, d: float) -> float:
+	var t := (d - float(b["d0"])) / (float(b["d1"]) - float(b["d0"]))
+	return _branch_arch(t) * float(b["off"])
+
+
+func _branch_at(d: float) -> Dictionary:
+	for b in _branches:
+		if d >= float(b["d0"]) and d <= float(b["d1"]):
+			return b
+	return {}
+
+
+# Separation profile: 0 at the ends (lanes merged into the centerline), ramping
+# smoothly to 1 across the middle (lanes fully split). This is what makes a fork
+# open out of, and close back into, a single road seamlessly.
+func _branch_arch(t: float) -> float:
+	if t <= 0.0 or t >= 1.0:
+		return 0.0
+	if t < BRANCH_RAMP:
+		return smoothstep(0.0, 1.0, t / BRANCH_RAMP)
+	if t > 1.0 - BRANCH_RAMP:
+		return smoothstep(0.0, 1.0, (1.0 - t) / BRANCH_RAMP)
+	return 1.0
+
+
+# True anywhere inside a branch feature (entry/exit ramps included). Standard
+# hazards and coins stay out of the whole thing — they'd be placed against the
+# single centerline, which is wrong once the lanes start separating — so the
+# fork stays its own clean navigation test.
+func _in_branch(d: float) -> bool:
+	return not _branch_at(d).is_empty()
+
+
+func _on_any_lane(d: float, x: float) -> bool:
+	for lane in road_lanes(d):
+		if absf(x - float(lane["c"])) <= float(lane["hw"]) - COL_HALF_W:
+			return true
+	return false
+
+
+func _nearest_lane_center(d: float, x: float) -> float:
+	var lanes := road_lanes(d)
+	var best := float(lanes[0]["c"])
+	for lane in lanes:
+		if absf(x - float(lane["c"])) < absf(x - best):
+			best = float(lane["c"])
+	return best
+
+
+func _clamp_to_nearest_lane(d: float, x: float) -> float:
+	var lanes := road_lanes(d)
+	var best: Dictionary = lanes[0]
+	for lane in lanes:
+		if absf(x - float(lane["c"])) < absf(x - float(best["c"])):
+			best = lane
+	var m := float(best["hw"]) - COL_HALF_W
+	return clampf(x, float(best["c"]) - m, float(best["c"]) + m)
+
+
+func _ensure_branches(up_to: float) -> void:
+	# scan forward in small steps; once we're past the spacing gate, drop a branch
+	# at the first stretch straight enough to make committing to a lane fair
+	while _branch_frontier_d < up_to:
+		_branch_frontier_d += 200.0
+		var d0 := _branch_frontier_d
+		if d0 < _next_branch_d:
+			continue
+		_ensure_track(d0 + 250.0)
+		if absf(road_center(d0 + 150.0) - road_center(d0 - 150.0)) > BRANCH_STRAIGHT_DELTA:
+			continue
+		# geometry scales with the road's current width, so forks keep pace with the
+		# narrowing road instead of being a fixed (and eventually oversized) size
+		var rhw := road_half_width(d0)
+		var lane_hw := clampf(rhw * LANE_FRAC, LANE_HW_MIN, rhw - 6.0)
+		var off := lane_hw + rhw * FORK_MEDIAN_FRAC
+		# length sized from a sweep cap so the lanes never peel apart faster than the
+		# car can track (smoothstep ramp peak slope = off*1.5/(len*RAMP))
+		var fork_len := maxf(FORK_LEN_MIN, off * 1.5 * MAX_SPEED * BOOST_MULT / (BRANCH_RAMP * FORK_SWEEP_CAP))
+		_ensure_track(d0 + fork_len + 200.0)
+		var b := { "d0": d0, "d1": d0 + fork_len, "hw": lane_hw, "off": off }
+		# the fork rides a straight chord, so only the road's NET drift across it
+		# matters — skip spots where that drift would make the chord too steep
+		var d1 := float(b["d1"])
+		if absf(road_center(d1) - road_center(d0)) > BRANCH_MAX_DRIFT:
+			continue
+		b["cx0"] = road_center(d0)
+		b["cx1"] = road_center(d1)
+		_branches.append(b)
+		var coin_side := 1.0 if randf() < 0.5 else -1.0
+		_seed_branch_coins(b, coin_side)
+		_next_branch_d = float(b["d1"]) + BRANCH_SPACING * randf_range(0.85, 1.25)
+
+
+# Line the chosen lane with coins — the risk/reward payoff for leaving the safe
+# centerline and committing to a fork.
+func _seed_branch_coins(b: Dictionary, side: float) -> void:
+	var d0 := float(b["d0"])
+	var d1 := float(b["d1"])
+	for k in range(BRANCH_COINS):
+		var dd := lerpf(d0, d1, lerpf(0.3, 0.7, float(k) / float(BRANCH_COINS - 1)))
+		var cx := _branch_axis(b, dd) + side * _branch_sep(b, dd)
+		_coins.append({ "d": dd, "x": cx, "got": false, "missed": false })
+
+
 func distance_at_row(y: float) -> float:
 	return distance + (CAR_Y - y)
 
@@ -1144,6 +1361,8 @@ func _ensure_coins(up_to: float) -> void:
 		if _coin_frontier_d < INTRO_DIST * 0.5:
 			continue
 		var d := _coin_frontier_d
+		if _in_branch(d):
+			continue   # branches seed their own coins along the scenic lane
 		var bc := road_center(d)
 		# reach is reduced on curves (where the road shifts across the coin's height)
 		var slope := absf(road_center(d + 30.0) - road_center(d - 30.0)) / 60.0
@@ -1190,40 +1409,71 @@ func _car_angle() -> float:
 	return clampf(lateral_velocity / STEER_SPEED, -1.0, 1.0) * MAX_TILT
 
 
+# Speed gauge: a swept dial (gap at the bottom) with a redline zone, tick
+# marks, and a needle, drawn in fixed screen space like the other HUD overlays.
+func _draw_speedometer() -> void:
+	var kmh := current_speed() / PX_PER_METER * 3.6
+	var span := GAUGE_MAX_KMH - GAUGE_MIN_KMH
+	var frac := clampf((kmh - GAUGE_MIN_KMH) / span, 0.0, 1.0)
+	var redline_frac := clampf((MAX_SPEED / PX_PER_METER * 3.6 - GAUGE_MIN_KMH) / span, 0.0, 1.0)
+	var start_rad := deg_to_rad(GAUGE_START_DEG)
+	var end_rad := deg_to_rad(GAUGE_END_DEG)
+
+	# colour grades green -> yellow -> red as the dial fills; locks to the state
+	# colours at the top end so MAX/BOOST read at a glance
+	var fill_col := Color(0.25, 0.9, 0.45).lerp(Color(1.0, 0.82, 0.2), clampf(frac * 1.6, 0.0, 1.0))
+	fill_col = fill_col.lerp(Color(1.0, 0.32, 0.26), clampf((frac - 0.55) * 2.2, 0.0, 1.0))
+	var hot := false
+	if _boost_timer > 0.0:
+		fill_col = COL_BOOST
+		hot = true
+	elif _ramp_speed() >= MAX_SPEED - 0.5:
+		fill_col = COL_SPEED_MAX
+		hot = true
+
+	# a tiny needle vibration at the top end makes the gauge feel alive
+	var jitter := 0.0
+	if hot:
+		jitter = sin(time_alive * 42.0) * 0.013
+	var needle_rad := deg_to_rad(lerpf(GAUGE_START_DEG, GAUGE_END_DEG, frac)) + jitter
+
+	# backing dial + redline zone
+	draw_circle(GAUGE_CENTER, GAUGE_R + 14.0, COL_GAUGE_BG)
+	draw_arc(GAUGE_CENTER, GAUGE_R, start_rad, end_rad, 48, COL_GAUGE_RING, 8.0, true)
+	var redline_rad := deg_to_rad(lerpf(GAUGE_START_DEG, GAUGE_END_DEG, redline_frac))
+	draw_arc(GAUGE_CENTER, GAUGE_R, redline_rad, end_rad, 16, COL_GAUGE_REDZONE, 8.0, true)
+
+	# filled progress arc — this is the part that visibly sweeps up with speed
+	if hot:
+		var pulse := 0.5 + 0.5 * sin(time_alive * 16.0)
+		var glow := fill_col
+		glow.a = 0.22 + 0.22 * pulse
+		draw_arc(GAUGE_CENTER, GAUGE_R, start_rad, needle_rad, 40, glow, 17.0, true)
+	if needle_rad > start_rad + 0.01:
+		draw_arc(GAUGE_CENTER, GAUGE_R, start_rad, needle_rad, 40, fill_col, 9.0, true)
+
+	for i in range(7):
+		var t := i / 6.0
+		var rad := deg_to_rad(lerpf(GAUGE_START_DEG, GAUGE_END_DEG, t))
+		var dir := Vector2(cos(rad), sin(rad))
+		draw_line(GAUGE_CENTER + dir * (GAUGE_R - 6.0), GAUGE_CENTER + dir * (GAUGE_R + 8.0), COL_GAUGE_TICK, 3.0)
+
+	# needle (counter-weighted) + hub
+	var ndir := Vector2(cos(needle_rad), sin(needle_rad))
+	draw_line(GAUGE_CENTER - ndir * 11.0, GAUGE_CENTER + ndir * (GAUGE_R - 14.0), fill_col, 5.0, true)
+	draw_circle(GAUGE_CENTER, 10.0, fill_col)
+	draw_circle(GAUGE_CENTER, 5.0, Color(0, 0, 0, 0.6))
+
+	if _ui_font != null:
+		draw_string(_ui_font, GAUGE_CENTER + Vector2(-54, GAUGE_R + 30.0), "%d" % int(kmh), HORIZONTAL_ALIGNMENT_CENTER, 108, 38, fill_col)
+		draw_string(_ui_font, GAUGE_CENTER + Vector2(-54, GAUGE_R + 58.0), "KM/H", HORIZONTAL_ALIGNMENT_CENTER, 108, 16, Color(1, 1, 1, 0.55))
+
+
 func _draw() -> void:
 	draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), col_offroad)
 	_draw_parallax()
 
-	var step := 3.0   # finer sampling keeps the polyline smooth through sharp turns
-	var left := PackedVector2Array()
-	var right := PackedVector2Array()
-	var centers: Array = []
-
-	var y := 0.0
-	while y <= SCREEN_H:
-		var d := distance_at_row(y)
-		var c := road_center(d)
-		var hw := road_half_width(d)
-		left.append(Vector2(_sx(c - hw), y))
-		right.append(Vector2(_sx(c + hw), y))
-		centers.append(Vector3(_sx(c), y, d))
-		y += step
-
-	var poly := PackedVector2Array()
-	poly.append_array(left)
-	for i in range(right.size() - 1, -1, -1):
-		poly.append(right[i])
-	draw_colored_polygon(poly, col_road)
-
-	draw_polyline(left, col_edge, 5.0, true)
-	draw_polyline(right, col_edge, 5.0, true)
-
-	# dashed center line as smooth strokes along the curve
-	for i in range(centers.size() - 1):
-		var p0: Vector3 = centers[i]
-		var p1: Vector3 = centers[i + 1]
-		if fposmod(p0.z, DASH_PERIOD) < DASH_PERIOD * 0.5:
-			draw_line(Vector2(p0.x, p0.y), Vector2(p1.x, p1.y), col_dash, 5.0, true)
+	_draw_road()
 
 	var in_game := state == State.PLAYING or state == State.CRASH or state == State.GAME_OVER or state == State.COUNTDOWN
 	if not in_game:
@@ -1315,19 +1565,30 @@ func _draw() -> void:
 			var bpos: Vector2 = b["pos"]
 			draw_circle(bpos, float(b["r"]) * (0.5 + brem * 0.8), bcol)
 
+	if state == State.PLAYING or state == State.COUNTDOWN or state == State.CRASH:
+		_draw_speedometer()
+
 	# floating pickup popups
 	for p in _popups:
 		var prem := 1.0 - float(p["age"]) / POPUP_LIFE
 		if prem <= 0.0:
 			continue
 		var pp2: Vector2 = p["pos"]
+		var pw: float = p["width"]
+		var inline: bool = p["inline"]
 		if bool(p["coin"]):
 			var cc := COL_COIN
 			cc.a = prem
-			draw_circle(pp2 + Vector2(0, 2), COIN_R * 0.7, cc)
+			if inline:
+				draw_circle(pp2 + Vector2(-pw * 0.5 + 14.0, 2), COIN_R * 0.7, cc)
+			else:
+				draw_circle(pp2 + Vector2(0, 2), COIN_R * 0.7, cc)
 		if _ui_font != null:
 			var txt: String = p["text"]
-			draw_string(_ui_font, pp2 + Vector2(-60, -14), txt, HORIZONTAL_ALIGNMENT_CENTER, 120, 30, Color(1, 1, 1, prem))
+			if inline:
+				draw_string(_ui_font, pp2 + Vector2(-pw * 0.5 + 34.0, -14), txt, HORIZONTAL_ALIGNMENT_LEFT, pw - 34.0, 28, Color(1, 1, 1, prem))
+			else:
+				draw_string(_ui_font, pp2 + Vector2(-pw * 0.5, -14), txt, HORIZONTAL_ALIGNMENT_CENTER, pw, 30, Color(1, 1, 1, prem))
 
 	# resume countdown
 	if state == State.COUNTDOWN:
@@ -1341,6 +1602,143 @@ func _draw() -> void:
 		var f := clampf((_crash_timer - (CRASH_TIME - 0.15)) / 0.15, 0.0, 1.0)
 		if f > 0.0:
 			draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), Color(1, 1, 1, f * 0.6))
+
+
+# Draws the road surface, edges and centre dashes. Off branches it's one
+# continuous band (the common case, unchanged); on a branch it draws the two
+# split lanes and lets the off-road show through the gap as the median.
+func _draw_road() -> void:
+	var step := 3.0   # finer sampling keeps the polyline smooth through sharp turns
+	var bot_d := distance_at_row(SCREEN_H)
+	var top_d := distance_at_row(0.0)
+
+	var any_branch := false
+	for b in _branches:
+		if not (float(b["d1"]) < bot_d or float(b["d0"]) > top_d):
+			any_branch = true
+			break
+
+	if not any_branch:
+		var left := PackedVector2Array()
+		var right := PackedVector2Array()
+		var centers: Array = []
+		var y := 0.0
+		while y <= SCREEN_H:
+			var d := distance_at_row(y)
+			var c := road_center(d)
+			var hw := road_half_width(d)
+			left.append(Vector2(_sx(c - hw), y))
+			right.append(Vector2(_sx(c + hw), y))
+			centers.append(Vector3(_sx(c), y, d))
+			y += step
+		_fill_band(left, right)
+		draw_polyline(left, col_edge, 5.0, true)
+		draw_polyline(right, col_edge, 5.0, true)
+		_draw_dashes(centers)
+		return
+
+	# branch path: two lane bands. The gap between them is left unpainted so the
+	# off-road shows through as the median. Only the OUTER edges are drawn
+	# continuously; the inner (median) edges are drawn only where the lanes have
+	# actually separated — that's what stops the edges intertwining at merges.
+	var l0 := PackedVector2Array()
+	var r0 := PackedVector2Array()
+	var l1 := PackedVector2Array()
+	var r1 := PackedVector2Array()
+	var cen0: Array = []
+	var cen1: Array = []
+	var open := PackedInt32Array()
+	var yy := 0.0
+	while yy <= SCREEN_H:
+		var d := distance_at_row(yy)
+		var lanes := road_lanes(d)
+		var c0 := float(lanes[0]["c"])
+		var hw0 := float(lanes[0]["hw"])
+		var c1 := float(lanes[1]["c"])
+		var hw1 := float(lanes[1]["hw"])
+		l0.append(Vector2(_sx(c0 - hw0), yy))
+		r0.append(Vector2(_sx(c0 + hw0), yy))
+		l1.append(Vector2(_sx(c1 - hw1), yy))
+		r1.append(Vector2(_sx(c1 + hw1), yy))
+		cen0.append(Vector3(_sx(c0), yy, d))
+		cen1.append(Vector3(_sx(c1), yy, d))
+		open.append(1 if (c1 - hw1) > (c0 + hw0) + 4.0 else 0)
+		yy += step
+	_fill_band(l0, r0)
+	_fill_band(l1, r1)
+	draw_polyline(l0, col_edge, 5.0, true)   # outer-left  (always a boundary)
+	draw_polyline(r1, col_edge, 5.0, true)   # outer-right (always a boundary)
+	_draw_open_edge(r0, open)                # inner edges (median kerb) only where open
+	_draw_open_edge(l1, open)
+	_draw_median(r0, l1, open, cen0)         # hazard chevrons + painted nose in the median
+	_draw_dashes(cen0)
+	_draw_dashes(cen1)
+
+
+func _fill_band(left: PackedVector2Array, right: PackedVector2Array) -> void:
+	var poly := PackedVector2Array()
+	poly.append_array(left)
+	for i in range(right.size() - 1, -1, -1):
+		poly.append(right[i])
+	draw_colored_polygon(poly, col_road)
+
+
+func _draw_dashes(centers: Array) -> void:
+	for i in range(centers.size() - 1):
+		var p0: Vector3 = centers[i]
+		var p1: Vector3 = centers[i + 1]
+		if fposmod(p0.z, DASH_PERIOD) < DASH_PERIOD * 0.5:
+			draw_line(Vector2(p0.x, p0.y), Vector2(p1.x, p1.y), col_dash, 5.0, true)
+
+
+# Draws an inner (median) edge only across rows where the median is open,
+# splitting into separate strokes so unrelated open regions (e.g. two branches
+# on screen at once) are never joined by a stray line — which is what produced
+# the intertwining edges before.
+func _draw_open_edge(pts: PackedVector2Array, open: PackedInt32Array) -> void:
+	var seg := PackedVector2Array()
+	for i in range(pts.size()):
+		if open[i] == 1:
+			seg.append(pts[i])
+		else:
+			if seg.size() >= 2:
+				draw_polyline(seg, col_edge, 5.0, true)
+			seg = PackedVector2Array()
+	if seg.size() >= 2:
+		draw_polyline(seg, col_edge, 5.0, true)
+
+
+# Marks the grass median where the road forks: hazard chevrons pointing back at
+# the driver down each open run, plus a bright painted nose cap at each tip — so
+# the split reads as an intentional road feature rather than a gap.
+func _draw_median(r0: PackedVector2Array, l1: PackedVector2Array, open: PackedInt32Array, cen: Array) -> void:
+	var n := open.size()
+	var i := 0
+	while i < n:
+		if open[i] == 0:
+			i += 1
+			continue
+		var j := i
+		while j < n and open[j] == 1:
+			j += 1
+		# one chevron per period of distance down this open run
+		var last := 1.0e20
+		for k in range(i, j):
+			var p: Vector3 = cen[k]
+			if last - p.z >= FORK_CHEVRON_PERIOD:
+				last = p.z
+				var rx := r0[k].x
+				var lx := l1[k].x
+				var w := (lx - rx) * 0.33
+				if w > 5.0:
+					var cx := (rx + lx) * 0.5
+					var y := r0[k].y
+					draw_line(Vector2(cx - w, y - 13.0), Vector2(cx, y), col_dash, 3.0, true)
+					draw_line(Vector2(cx + w, y - 13.0), Vector2(cx, y), col_dash, 3.0, true)
+		# bright painted nose caps at both tips of the gore
+		draw_circle((r0[i] + l1[i]) * 0.5, 6.0, col_edge)
+		draw_circle((r0[j - 1] + l1[j - 1]) * 0.5, 6.0, col_edge)
+		i = j
 
 
 func _draw_parallax() -> void:
