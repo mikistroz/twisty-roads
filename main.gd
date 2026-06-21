@@ -84,10 +84,9 @@ const BRANCH_RAMP := 0.22         # fraction of a fork's length spent splitting 
 const LANE_FRAC := 0.62           # split-lane half-width as a fraction of the local road
 const LANE_HW_MIN := 76.0
 const FORK_MEDIAN_FRAC := 0.2     # fork median half-width as a fraction of the local road
-const FORK_SWEEP_CAP := 460.0     # how fast the lanes may peel apart (the wide lanes absorb it)
+const FORK_SWEEP_CAP := 320.0     # how fast lanes may peel apart; lower => longer, gentler forks a player can still track at boosted top speed
 const BRANCH_STRAIGHT_DELTA := 70.0  # entry must be at least this straight (per 300px)
 const BRANCH_MAX_DRIFT := 280.0   # max sideways drift of the road across a fork (chord stays gentle)
-const FORK_CHEVRON_PERIOD := 110.0   # distance between the median hazard chevrons
 const BRANCH_COINS := 4           # coins seeded along the scenic lane
 
 # Fork variety: a branch picks a STYLE and randomises its geometry so no two read
@@ -101,6 +100,17 @@ const FORK_HW_VARY := 0.22        # +/- fraction jittered onto each lane's half-
 const FORK_RAMP_VARY := 0.45      # +/- fraction jittered onto each lane's split ramp
 const FORK_ASYM_CHANCE := 0.5     # chance a fork is lopsided rather than mirror-symmetric
 const SHOULDER_CHANCE := 0.4      # chance a branch is a bailout shoulder instead of a fork
+
+# Forks aren't dead-straight chords any more: a gentle sideways WAVE (faded in/out
+# at the merges so it stays seamless) makes the split wind, and each fork can carry
+# OIL slicks in its lanes so committing to one is a real test, not a cruise. The
+# wave is kept small enough that a lane never moves sideways faster than the player
+# can track, even stacked on top of the split peel.
+const FORK_WAVE_AMP := 14.0       # max sideways wander added across a fork
+const FORK_WAVE_LEN := 1050.0     # wavelength of that wander
+const FORK_WAVE_CHANCE := 0.8     # chance a fork winds rather than running straight
+const FORK_OIL_CHANCE := 0.6      # chance a fork is seeded with oil slicks
+const FORK_OIL_MAX := 3           # up to this many oil slicks across a fork's lanes
 
 # Bailout shoulder: the main road stays full width and a narrower coin lane
 # sprouts from ONE shoulder, bulges out around a grass median, then merges back —
@@ -152,6 +162,20 @@ const JUMP_GAP_HALF := 20.0       # half the hole's length along the road
 const JUMP_GAP_RUNWAY := 460.0    # clear road reserved past the hole for the landing (covers max-speed arc)
 const RAMP_GAP_INSET := 6.0       # ramp half-width = road half-width minus this
 
+# ---------------- ramming ----------------
+# Landing a ramp grants a short boost; while it's active the car ploughs straight
+# THROUGH blockers and traffic instead of crashing, banking RAM_COINS per smash.
+const RAM_COINS := 2
+
+# ---------------- background decorations ----------------
+# Purely cosmetic props scattered in the off-road on both sides (rocks/trees/etc.).
+# They carry a stable variant index so the art pipeline can map each to a per-theme
+# sprite later; until then they draw as simple themed primitives.
+const DECO_SPACING := 150.0       # avg world-distance between props on one side
+const DECO_MARGIN := 26.0         # min gap from the road edge to a prop
+const DECO_BAND := 230.0          # how far out into the off-road props may sit
+const DECO_VARIANTS := 3          # number of primitive prop shapes / sprite slots
+
 const COL_BLOCK := Color("f4c20d")
 const COL_BLOCK_DARK := Color("141414")
 const COL_TRAFFIC := Color("e74c3c")
@@ -185,23 +209,37 @@ const COL_GAUGE_REDZONE := Color("ff5a5f")
 # ---------------- save ----------------
 const SAVE_PATH := "user://twisty_roads.cfg"
 
+# ---------------- art pipeline ----------------
+# Convention-based, exactly like the audio: drop a texture at
+# res://art/<theme>/<slot>.<ext> and it's used automatically; if it's missing the
+# matching res://art/default/<slot> is tried, and failing that the primitive
+# _draw fallback runs — so the game looks identical with or without art present.
+# Slots: road, background (both tiled), car (player), enemy_0/1/.. (random per
+# car), deco_0/1/.. (background props). "enemy" and "deco" also accept an
+# unnumbered single file. Lists let a theme ship several car/prop variants.
+const ART_DIR := "res://art/"
+const ART_EXTS := ["png", "webp", "jpg", "jpeg", "svg"]
+const ROAD_TEX_TILE := 220.0      # world-distance the road texture spans before repeating
+const BG_TEX_PARALLAX := 0.45     # how much the background texture scrolls vs the world
+
 # ---------------- themes ----------------
 # Palettes are placeholders that approximate each theme until real sprites land.
-# "car"/"enemy" name the vehicles, "vfx" names the effect set — these are the
-# slots the art pipeline will key off (e.g. load res://art/<id>/car.png).
+# "vehicle"/"enemy" name the vehicles, "vfx" names the effect set, "stripes" says
+# whether the road carries a painted centre line (off-road / track surfaces don't)
+# — these are the slots the art pipeline keys off (e.g. res://art/<id>/car.png).
 const THEME_ORDER := ["default", "synthwave", "track", "rally", "jdm", "jetski", "sand", "mud", "rainbow", "frostbite", "wiped"]
 const THEMES := {
-	"default":   { "name": "Standard",     "price": 0,    "offroad": "2e5d34", "road": "3c4146", "edge": "e8e8e8", "dash": "f2c14e", "car": "1f6fd0", "car_dark": "0d4a99", "vehicle": "BMW E46",          "enemy": "Toyota RAV4",       "vfx": "dust" },
-	"synthwave": { "name": "Synthwave",    "price": 300,  "offroad": "1a0b2e", "road": "241341", "edge": "ff2e97", "dash": "00f0ff", "car": "ffd319", "car_dark": "ff5f1f", "vehicle": "Lamborghini Countach", "enemy": "Sports coupes", "vfx": "neon" },
-	"track":     { "name": "Track Attack", "price": 400,  "offroad": "2e7d32", "road": "3a3a3a", "edge": "e03131", "dash": "ffffff", "car": "e10600", "car_dark": "8a0400", "vehicle": "Open-wheel racer", "enemy": "Open-wheel racers", "vfx": "smoke" },
-	"rally":     { "name": "Rally Rush",   "price": 500,  "offroad": "234a25", "road": "6b4f2a", "edge": "caa15a", "dash": "ffffff", "car": "1565c0", "car_dark": "0d47a1", "vehicle": "Subaru Impreza",   "enemy": "Mitsubishi Lancer", "vfx": "gravel" },
-	"jdm":       { "name": "JDM",          "price": 600,  "offroad": "0d1b2a", "road": "23272e", "edge": "f72585", "dash": "4cc9f0", "car": "e6552a", "car_dark": "a83419", "vehicle": "Toyota Supra",     "enemy": "Mazda Miata",       "vfx": "underglow" },
-	"jetski":    { "name": "Jetski Escape","price": 700,  "offroad": "e3c98f", "road": "1f7a8c", "edge": "9be7ff", "dash": "ffffff", "car": "ff5252", "car_dark": "b71c1c", "vehicle": "Jetski",          "enemy": "Jetskis",           "vfx": "splash" },
-	"sand":      { "name": "Sand Rally",   "price": 800,  "offroad": "c2954e", "road": "9c7a3c", "edge": "e8d6a0", "dash": "ffffff", "car": "2e7d32", "car_dark": "1b5e20", "vehicle": "Rally buggy",      "enemy": "Porsche Safari",    "vfx": "sand" },
-	"mud":       { "name": "Mud Sprint",   "price": 900,  "offroad": "3b5323", "road": "5b432a", "edge": "8a6d3b", "dash": "ffffff", "car": "d32f2f", "car_dark": "9a1f1f", "vehicle": "Enduro bike",      "enemy": "Enduro bikes",      "vfx": "mud" },
-	"rainbow":   { "name": "Rainbow Lane", "price": 1000, "offroad": "0b0b2a", "road": "3a2f5e", "edge": "ff5ec7", "dash": "ffffff", "car": "ffeb3b", "car_dark": "fbc02d", "vehicle": "Kart",            "enemy": "Karts",             "vfx": "rainbow" },
-	"frostbite": { "name": "Frostbite Run","price": 1200, "offroad": "dfe9f0", "road": "8fa8bf", "edge": "5b86b0", "dash": "ffffff", "car": "455a64", "car_dark": "263238", "vehicle": "Ford F-150",      "enemy": "Porsche Cayenne",   "vfx": "snow" },
-	"wiped":     { "name": "Wiped Out",    "price": 1500, "offroad": "0a1226", "road": "13294b", "edge": "39c0ff", "dash": "8affff", "car": "00e5ff", "car_dark": "0091a7", "vehicle": "Hover racer",      "enemy": "Hover racers",      "vfx": "energy" },
+	"default":   { "name": "Standard",     "price": 0,    "offroad": "2e5d34", "road": "3c4146", "edge": "e8e8e8", "dash": "f2c14e", "stripes": true,  "car": "1f6fd0", "car_dark": "0d4a99", "vehicle": "BMW E46",          "enemy": "Toyota RAV4",       "vfx": "dust" },
+	"synthwave": { "name": "Synthwave",    "price": 300,  "offroad": "1a0b2e", "road": "241341", "edge": "ff2e97", "dash": "00f0ff", "stripes": true,  "car": "ffd319", "car_dark": "ff5f1f", "vehicle": "Lamborghini Countach", "enemy": "Sports coupes", "vfx": "neon" },
+	"track":     { "name": "Track Attack", "price": 400,  "offroad": "2e7d32", "road": "3a3a3a", "edge": "e03131", "dash": "ffffff", "stripes": false, "car": "e10600", "car_dark": "8a0400", "vehicle": "Open-wheel racer", "enemy": "Open-wheel racers", "vfx": "smoke" },
+	"rally":     { "name": "Rally Rush",   "price": 500,  "offroad": "234a25", "road": "6b4f2a", "edge": "caa15a", "dash": "ffffff", "stripes": false, "car": "1565c0", "car_dark": "0d47a1", "vehicle": "Subaru Impreza",   "enemy": "Mitsubishi Lancer", "vfx": "gravel" },
+	"jdm":       { "name": "JDM",          "price": 600,  "offroad": "0d1b2a", "road": "23272e", "edge": "f72585", "dash": "4cc9f0", "stripes": true,  "car": "e6552a", "car_dark": "a83419", "vehicle": "Toyota Supra",     "enemy": "Mazda Miata",       "vfx": "underglow" },
+	"jetski":    { "name": "Jetski Escape","price": 700,  "offroad": "e3c98f", "road": "1f7a8c", "edge": "9be7ff", "dash": "ffffff", "stripes": false, "car": "ff5252", "car_dark": "b71c1c", "vehicle": "Jetski",          "enemy": "Jetskis",           "vfx": "splash" },
+	"sand":      { "name": "Sand Rally",   "price": 800,  "offroad": "c2954e", "road": "9c7a3c", "edge": "e8d6a0", "dash": "ffffff", "stripes": false, "car": "2e7d32", "car_dark": "1b5e20", "vehicle": "Rally buggy",      "enemy": "Porsche Safari",    "vfx": "sand" },
+	"mud":       { "name": "Mud Sprint",   "price": 900,  "offroad": "3b5323", "road": "5b432a", "edge": "8a6d3b", "dash": "ffffff", "stripes": false, "car": "d32f2f", "car_dark": "9a1f1f", "vehicle": "Enduro bike",      "enemy": "Enduro bikes",      "vfx": "mud" },
+	"rainbow":   { "name": "Rainbow Lane", "price": 1000, "offroad": "0b0b2a", "road": "3a2f5e", "edge": "ff5ec7", "dash": "ffffff", "stripes": true,  "car": "ffeb3b", "car_dark": "fbc02d", "vehicle": "Kart",            "enemy": "Karts",             "vfx": "rainbow" },
+	"frostbite": { "name": "Frostbite Run","price": 1200, "offroad": "dfe9f0", "road": "8fa8bf", "edge": "5b86b0", "dash": "ffffff", "stripes": false, "car": "455a64", "car_dark": "263238", "vehicle": "Ford F-150",      "enemy": "Porsche Cayenne",   "vfx": "snow" },
+	"wiped":     { "name": "Wiped Out",    "price": 1500, "offroad": "0a1226", "road": "13294b", "edge": "39c0ff", "dash": "8affff", "stripes": true,  "car": "00e5ff", "car_dark": "0091a7", "vehicle": "Hover racer",      "enemy": "Hover racers",      "vfx": "energy" },
 }
 
 # ---------------- challenges ----------------
@@ -252,6 +290,15 @@ var col_edge: Color
 var col_dash: Color
 var col_car: Color
 var col_car_dark: Color
+var col_deco: Color                # tint for primitive background props
+var _theme_stripes := true         # does the current theme paint a centre line?
+
+# Convention-loaded theme art (null = use the primitive fallback). Mirrors audio.
+var _tex_road: Texture2D
+var _tex_bg: Texture2D
+var _tex_car: Texture2D
+var _tex_enemy: Array[Texture2D] = []
+var _tex_deco: Array[Texture2D] = []
 
 var _pt_d := PackedFloat32Array()
 var _pt_x := PackedFloat32Array()
@@ -269,6 +316,8 @@ var _coins: Array = []
 var _coin_frontier_d := 0.0
 var _hazards: Array = []
 var _hazard_frontier_d := 0.0
+var _decos: Array = []             # background props {d, x, side, variant, scale}
+var _deco_frontier_d := 0.0
 var _tire_marks: Array = []
 var _particles: Array = []
 var _boom: Array = []
@@ -288,13 +337,14 @@ var _ui_font: Font
 # Engine is two crossfaded loops (engine_low/engine_high) rather than one
 # loop with a wide pitch shift, so going fast changes the engine's timbre
 # instead of just speeding up its pitch — avoids the droney/chipmunk effect.
-# Expected slots: crash, coin, land, near_miss, jump, oil_squeal, horn,
+# Expected slots: crash, coin, land, near_miss, jump, smash, oil_squeal, horn,
 # purchase, challenge, ui_tap, engine_low, engine_high.
 var _sfx_crash: AudioStreamPlayer
 var _sfx_coin: AudioStreamPlayer
 var _sfx_land: AudioStreamPlayer
 var _sfx_near_miss: AudioStreamPlayer
 var _sfx_jump: AudioStreamPlayer
+var _sfx_smash: AudioStreamPlayer
 var _sfx_oil: AudioStreamPlayer
 var _sfx_beep: AudioStreamPlayer
 var _sfx_purchase: AudioStreamPlayer
@@ -329,6 +379,8 @@ var _go_challenge: Label
 
 func _ready() -> void:
 	randomize()
+	# lets a road texture tile along its length via UVs > 1 (see _fill_band)
+	texture_repeat = CanvasItem.TEXTURE_REPEAT_ENABLED
 	_ui_font = ThemeDB.fallback_font
 	_micro_noise.frequency = 0.01
 	_load_save()
@@ -382,6 +434,61 @@ func _apply_theme(id: String) -> void:
 	col_dash = Color(t["dash"])
 	col_car = Color(t["car"])
 	col_car_dark = Color(t["car_dark"])
+	_theme_stripes = bool(t.get("stripes", true))
+	# primitive prop tint: keep it readable whatever the ground colour is
+	if col_offroad.get_luminance() < 0.4:
+		col_deco = col_offroad.lightened(0.32)
+	else:
+		col_deco = col_offroad.darkened(0.42)
+	_load_theme_art(id)
+
+
+# ============================================================
+#  ART (convention-based textures; mirrors the audio loader below)
+# ============================================================
+# Texture for one slot in one theme, or null. Single slots (road/background/car)
+# fall back to the default theme's texture; lists fall back as a whole set.
+func _load_tex_exact(theme_id: String, slot: String) -> Texture2D:
+	for ext in ART_EXTS:
+		var path := "%s%s/%s.%s" % [ART_DIR, theme_id, slot, ext]
+		if ResourceLoader.exists(path):
+			return load(path)
+	return null
+
+
+func _load_tex(theme_id: String, slot: String) -> Texture2D:
+	var tex := _load_tex_exact(theme_id, slot)
+	if tex == null and theme_id != "default":
+		tex = _load_tex_exact("default", slot)
+	return tex
+
+
+# A slot may ship as a single file (slot.png) or a numbered series
+# (slot_0.png, slot_1.png, ...). Returns the theme's own set, else the default's.
+func _load_tex_list(theme_id: String, slot: String) -> Array[Texture2D]:
+	for tid in [theme_id, "default"]:
+		var out: Array[Texture2D] = []
+		var single := _load_tex_exact(tid, slot)
+		if single != null:
+			out.append(single)
+		var i := 0
+		while true:
+			var t := _load_tex_exact(tid, "%s_%d" % [slot, i])
+			if t == null:
+				break
+			out.append(t)
+			i += 1
+		if out.size() > 0:
+			return out
+	return []
+
+
+func _load_theme_art(id: String) -> void:
+	_tex_road = _load_tex(id, "road")
+	_tex_bg = _load_tex(id, "background")
+	_tex_car = _load_tex(id, "car")
+	_tex_enemy = _load_tex_list(id, "enemy")
+	_tex_deco = _load_tex_list(id, "deco")
 
 
 # ============================================================
@@ -412,6 +519,7 @@ func _build_audio() -> void:
 	_sfx_land = _make_player("land", "Master", -2.0)
 	_sfx_near_miss = _make_player("near_miss", "Master", -2.0)
 	_sfx_jump = _make_player("jump", "Master", -2.0)
+	_sfx_smash = _make_player("smash", "Master", -1.0)
 	_sfx_oil = _make_player("oil_squeal", "Master", -3.0)
 	_sfx_beep = _make_player("horn", "Master", -6.0)
 	_sfx_purchase = _make_player("purchase", "Master", -3.0)
@@ -554,6 +662,7 @@ func _reset_world() -> void:
 	_bias = 0.0
 	_coins.clear()
 	_hazards.clear()
+	_decos.clear()
 	_tire_marks.clear()
 	_particles.clear()
 	_boom.clear()
@@ -561,6 +670,7 @@ func _reset_world() -> void:
 	_pattern_queue.clear()
 	_coin_frontier_d = 0.0
 	_hazard_frontier_d = 0.0
+	_deco_frontier_d = 0.0
 	_branches.clear()
 	_branch_frontier_d = 0.0
 	_next_branch_d = INTRO_DIST + 1200.0
@@ -607,6 +717,7 @@ func _start_run() -> void:
 	_ensure_branches(distance + 1400.0)
 	_ensure_hazards(distance + 1400.0)
 	_ensure_coins(distance + 1400.0)
+	_ensure_decos(distance + 1400.0)
 	_hud_score.text = "0"
 	_hud_coins.text = "Coins: 0"
 	_hud_prompt.visible = true
@@ -812,6 +923,7 @@ func _update_play(delta: float) -> void:
 	_ensure_branches(distance + 1400.0)
 	_ensure_hazards(distance + 1400.0)
 	_ensure_coins(distance + 1400.0)
+	_ensure_decos(distance + 1400.0)
 	_drop_old()
 
 	# camera follows the car (with a little look-ahead toward the upcoming road)
@@ -853,13 +965,18 @@ func _update_play(delta: float) -> void:
 
 	_emit_exhaust(delta)
 	_update_particles(delta)
+	_update_boom(delta)        # smash debris from ram-throughs animates during play too
 	_update_tire_marks(delta)
 
 	_no_coin_timer += delta
 	if _no_coin_timer > _no_coin_best:
 		_no_coin_best = _no_coin_timer
 
-	if not airborne and not _on_any_lane(distance, car_x):
+	# Ramp boost makes the car unstoppable: it ploughs through blockers/traffic
+	# (see _update_hazards) AND rides straight over the off-road, so a fork that
+	# peels faster than you can steer at boosted top speed never punishes you. The
+	# jump-the-gap hole is the one thing boost can't cheat — you still must ramp it.
+	if not airborne and _boost_timer <= 0.0 and not _on_any_lane(distance, car_x):
 		_crash()
 		return
 
@@ -904,9 +1021,16 @@ func _drop_old() -> void:
 		ci -= 1
 	var i := _hazards.size() - 1
 	while i >= 0:
-		if float(_hazards[i]["d"]) < distance - 600.0:
+		# drop hazards once behind, or as soon as they've been smashed by a ram
+		if float(_hazards[i]["d"]) < distance - 600.0 or bool(_hazards[i].get("dead", false)):
 			_hazards.remove_at(i)
 		i -= 1
+	# decorations are seeded both sides out of order, so scan all
+	var di := _decos.size() - 1
+	while di >= 0:
+		if float(_decos[di]["d"]) < distance - 600.0:
+			_decos.remove_at(di)
+		di -= 1
 	var bi := _branches.size() - 1
 	while bi >= 0:
 		if float(_branches[bi]["d1"]) < distance - 700.0:
@@ -952,7 +1076,7 @@ func _ensure_hazards(up_to: float) -> void:
 				if randf() < 0.5:
 					sgn = -1.0
 				var lane := sgn * randf_range(0.24, 0.44)
-				_hazards.append({ "d": d, "x": bc + lane * road_half_width(d), "type": "traffic", "lane": lane, "ang": 0.0, "hit": false, "spd": randf_range(TRAFFIC_REL_MIN, TRAFFIC_REL_MAX), "scored": false })
+				_hazards.append({ "d": d, "x": bc + lane * road_half_width(d), "type": "traffic", "lane": lane, "ang": 0.0, "hit": false, "spd": randf_range(TRAFFIC_REL_MIN, TRAFFIC_REL_MAX), "scored": false, "sprite": randi() })
 		elif roll < 0.78:
 			if bandh >= OIL_R * 0.6 + 30.0:
 				var ox := bc + randf_range(-0.35, 0.35) * (bandh - OIL_R * 0.4)
@@ -994,8 +1118,25 @@ func _spawn_jump_gap(d: float) -> float:
 	return d + reserve
 
 
+# Ploughing through a blocker/car while boosting from a ramp: destroy it, bank
+# RAM_COINS, and throw an explosion where it was. The hazard is flagged dead so it
+# stops colliding and drawing, then _drop_old clears it.
+func _smash_hazard(h: Dictionary) -> void:
+	h["dead"] = true
+	session_coins += RAM_COINS
+	var sxp := _sx(float(h["x"]))
+	var syp := CAR_Y - (float(h["d"]) - distance)
+	_spawn_explosion(sxp, syp)
+	_add_popup(sxp, syp - 24.0, "SMASH! +%d" % RAM_COINS, true, 240.0, true)
+	Input.vibrate_handheld(40)
+	_play_sfx(_sfx_smash)
+
+
 func _update_hazards(delta: float, airborne: bool) -> void:
+	var ramming := _boost_timer > 0.0
 	for h in _hazards:
+		if bool(h.get("dead", false)):
+			continue
 		var htype: String = h["type"]
 		if htype == "traffic":
 			# closing speed scales with the player's speed (enemies get faster too)
@@ -1015,6 +1156,9 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 		var dx := absf(hx - car_x)
 		if htype == "block":
 			if not airborne and dy < COL_HALF_H + BLOCK_H * 0.5 and dx < COL_HALF_W + BLOCK_W * 0.5:
+				if ramming:
+					_smash_hazard(h)
+					continue
 				_crash()
 				return
 			# near miss: squeezed past a static block without crashing -> reward
@@ -1025,6 +1169,9 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 				_play_sfx(_sfx_near_miss)
 		elif htype == "traffic":
 			if not airborne and dy < COL_HALF_H + TRAFFIC_H * 0.5 and dx < COL_HALF_W + TRAFFIC_W * 0.5:
+				if ramming:
+					_smash_hazard(h)
+					continue
 				_crash()
 				return
 			# near miss: passed close alongside without crashing -> reward
@@ -1331,13 +1478,27 @@ func _lane_geom(b: Dictionary, lane: Dictionary, d: float, axis: float, fullhw: 
 # The local reference line the branch's lanes ride on: it blends from the actual
 # (possibly curving) centerline at the merge points to a straight chord across
 # the middle, in step with how far the lanes have separated — so a thin split
-# lane is never dragged sideways by a bend in the underlying road.
+# lane is never dragged sideways by a bend in the underlying road. A gentle wave
+# is layered on so forks wind instead of running dead-straight (both lanes ride
+# the same axis, so the median stays intact and the wander reads as one curve).
 func _branch_axis(b: Dictionary, d: float) -> float:
 	var d0 := float(b["d0"])
 	var t := (d - d0) / (float(b["d1"]) - d0)
 	var chord := lerpf(float(b["cx0"]), float(b["cx1"]), t)
 	var frac := clampf(_branch_sep(b, d) / maxf(float(b["off"]), 1.0), 0.0, 1.0)
-	return lerpf(road_center(d), chord, frac)
+	return lerpf(road_center(d), chord, frac) + _branch_wave(b, d)
+
+
+# Sideways wander added across a fork, faded to zero at both merges (via the same
+# arch the split uses) so the entry/exit stay seamless. Amplitude/wavelength are
+# capped at fork-build time to keep a lane trackable even stacked on the peel.
+func _branch_wave(b: Dictionary, d: float) -> float:
+	var amp := float(b.get("wave_amp", 0.0))
+	if amp == 0.0:
+		return 0.0
+	var d0 := float(b["d0"])
+	var env := _branch_arch((d - d0) / (float(b["d1"]) - d0))
+	return sin((d - d0) / float(b["wave_len"]) * TAU + float(b["wave_phase"])) * amp * env
 
 
 # Lane-center offset from the axis at distance d: the smoothstep arch ramps the
@@ -1434,6 +1595,7 @@ func _ensure_branches(up_to: float) -> void:
 		b["cx1"] = road_center(d1)
 		_branches.append(b)
 		_seed_branch_coins(b)
+		_seed_fork_hazards(b)
 		_next_branch_d = d1 + BRANCH_SPACING * randf_range(0.85, 1.25)
 
 
@@ -1462,9 +1624,17 @@ func _make_fork(d0: float, rhw: float) -> Dictionary:
 	var min_ramp := clampf(minf(ramp_l, ramp_r), 0.05, 0.5)
 	var min_len := maxf(FORK_LEN_MIN, max_off * 1.5 * MAX_SPEED * BOOST_MULT / (min_ramp * FORK_SWEEP_CAP))
 	var fork_len := min_len * randf_range(1.0, FORK_LEN_VARY_MAX)
+	# gentle wind: amplitude is held under what the player can still track once it is
+	# stacked on the split peel (verified in the fairness harness)
+	var wave_amp := 0.0
+	var wave_phase := 0.0
+	if randf() < FORK_WAVE_CHANCE:
+		wave_amp = FORK_WAVE_AMP * randf_range(0.55, 1.0)
+		wave_phase = randf() * TAU
 	return {
 		"kind": "fork",
 		"d0": d0, "d1": d0 + fork_len, "off": max_off,
+		"wave_amp": wave_amp, "wave_len": FORK_WAVE_LEN * randf_range(0.8, 1.3), "wave_phase": wave_phase,
 		"lane0": { "side": -1.0, "off": off_l, "hw": hw_l, "t0": 0.0, "t1": 1.0, "ramp": ramp_l },
 		"lane1": { "side": 1.0, "off": off_r, "hw": hw_r, "t0": 0.0, "t1": 1.0, "ramp": ramp_r },
 		"coin_lane": 1 if randf() < 0.5 else 0,
@@ -1516,6 +1686,25 @@ func _seed_branch_coins(b: Dictionary) -> void:
 		var axis := _branch_axis(b, dd)
 		var g := _lane_geom(b, lane, dd, axis, road_half_width(dd))
 		_coins.append({ "d": dd, "x": float(g["c"]), "got": false, "missed": false })
+
+
+# Scatter OIL slicks down a fork's lanes so committing to a side is a real test,
+# not a straight cruise. Oil only makes you slip (never blocks), so whichever lane
+# you pick is always passable — the fork stays fair while feeling alive.
+func _seed_fork_hazards(b: Dictionary) -> void:
+	if String(b.get("kind", "")) != "fork":
+		return
+	if randf() > FORK_OIL_CHANCE:
+		return
+	var d0 := float(b["d0"])
+	var d1 := float(b["d1"])
+	for k in range(randi_range(1, FORK_OIL_MAX)):
+		var lane: Dictionary = b["lane%d" % (randi() % 2)]
+		var dd := lerpf(d0, d1, randf_range(0.28, 0.72))
+		var g := _lane_geom(b, lane, dd, _branch_axis(b, dd), road_half_width(dd))
+		# nudge within the lane so the slick isn't always dead-centre
+		var nudge := randf_range(-0.4, 0.4) * maxf(float(g["hw"]) - OIL_R * 0.5, 0.0)
+		_hazards.append({ "d": dd, "x": float(g["c"]) + nudge, "type": "oil", "lane": 0.0, "ang": 0.0, "hit": false, "in_fork": true })
 
 
 func distance_at_row(y: float) -> float:
@@ -1578,6 +1767,54 @@ func _coin_blocked(d: float, x: float) -> bool:
 		if absf(float(h["d"]) - d) < half_h + COIN_R and absf(float(h["x"]) - x) < half_w + COIN_R:
 			return true
 	return false
+
+
+# ============================================================
+#  BACKGROUND DECORATIONS (cosmetic props in the off-road, both sides)
+# ============================================================
+# Each prop carries a stable variant index + scale so the art pipeline can later
+# swap it for a per-theme sprite (res://art/<theme>/deco_<variant>.png); until
+# then they draw as simple themed primitives. They never touch the road.
+func _ensure_decos(up_to: float) -> void:
+	while _deco_frontier_d < up_to:
+		_deco_frontier_d += DECO_SPACING * randf_range(0.55, 1.45)
+		var base_d := _deco_frontier_d
+		_ensure_track(base_d + 60.0)
+		for sgn in [-1.0, 1.0]:
+			if randf() < 0.45:
+				continue   # leave gaps so the off-road isn't a solid wall of props
+			var side := float(sgn)
+			var d := base_d + randf_range(-DECO_SPACING * 0.4, DECO_SPACING * 0.4)
+			var edge := road_center(d) + side * (road_half_width(d) + DECO_MARGIN)
+			_decos.append({
+				"d": d,
+				"x": edge + side * randf_range(0.0, DECO_BAND),
+				"side": side,
+				"variant": randi() % DECO_VARIANTS,
+				"scale": randf_range(0.8, 1.5),
+			})
+
+
+# Primitive stand-in for a decoration sprite. Variants read as a tree, a rock and
+# a marker post — placeholders sized/keyed so per-theme sprites can drop straight in.
+func _draw_deco_primitive(pos: Vector2, variant: int, s: float) -> void:
+	match variant:
+		0:   # tree: trunk + canopy
+			draw_rect(Rect2(pos.x - 3.0 * s, pos.y - 6.0 * s, 6.0 * s, 16.0 * s), col_deco.darkened(0.25))
+			draw_circle(pos + Vector2(0, -16.0 * s), 14.0 * s, col_deco)
+			draw_circle(pos + Vector2(-7.0 * s, -10.0 * s), 9.0 * s, col_deco)
+			draw_circle(pos + Vector2(7.0 * s, -10.0 * s), 9.0 * s, col_deco)
+		1:   # rock: chunky polygon
+			var r := PackedVector2Array([
+				pos + Vector2(-14.0 * s, 6.0 * s), pos + Vector2(-9.0 * s, -9.0 * s),
+				pos + Vector2(5.0 * s, -12.0 * s), pos + Vector2(15.0 * s, -2.0 * s),
+				pos + Vector2(11.0 * s, 7.0 * s),
+			])
+			draw_colored_polygon(r, col_deco)
+			draw_line(pos + Vector2(-9.0 * s, -9.0 * s), pos + Vector2(2.0 * s, 2.0 * s), col_deco.darkened(0.3), 2.0)
+		_:   # marker post
+			draw_rect(Rect2(pos.x - 3.0 * s, pos.y - 22.0 * s, 6.0 * s, 28.0 * s), col_deco)
+			draw_circle(pos + Vector2(0, -22.0 * s), 5.0 * s, col_edge)
 
 
 # ============================================================
@@ -1648,9 +1885,9 @@ func _draw_speedometer() -> void:
 
 
 func _draw() -> void:
-	draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), col_offroad)
+	_draw_background()
 	_draw_parallax()
-
+	_draw_decos()        # off-road props sit behind the road surface
 	_draw_road()
 
 	var in_game := state == State.PLAYING or state == State.CRASH or state == State.GAME_OVER or state == State.COUNTDOWN
@@ -1666,6 +1903,8 @@ func _draw() -> void:
 			draw_rect(Rect2(_sx(float(m["x"])) - 3.0, my - 4.0, 6.0, 8.0), tc)
 
 	for h in _hazards:
+		if bool(h.get("dead", false)):
+			continue
 		var hd := float(h["d"])
 		var hy := CAR_Y - (hd - distance)
 		if hy < -160.0 or hy > SCREEN_H + 160.0:
@@ -1681,8 +1920,12 @@ func _draw() -> void:
 				draw_rect(Rect2(hx - BLOCK_W * 0.5 + 4.0 + k * 20.0, hy - BLOCK_H * 0.5, 9.0, BLOCK_H), COL_BLOCK_DARK)
 		elif ht == "traffic":
 			draw_set_transform(Vector2(hx, hy), float(h["ang"]), Vector2.ONE)
-			draw_rect(Rect2(-TRAFFIC_W * 0.5, -TRAFFIC_H * 0.5, TRAFFIC_W, TRAFFIC_H), COL_TRAFFIC)
-			draw_rect(Rect2(-TRAFFIC_W * 0.5 + 8.0, TRAFFIC_H * 0.5 - 48.0, TRAFFIC_W - 16.0, 30.0), COL_TRAFFIC_DARK)
+			if _tex_enemy.size() > 0:
+				var et: Texture2D = _tex_enemy[int(h.get("sprite", 0)) % _tex_enemy.size()]
+				draw_texture_rect(et, Rect2(-TRAFFIC_W * 0.5, -TRAFFIC_H * 0.5, TRAFFIC_W, TRAFFIC_H), false)
+			else:
+				draw_rect(Rect2(-TRAFFIC_W * 0.5, -TRAFFIC_H * 0.5, TRAFFIC_W, TRAFFIC_H), COL_TRAFFIC)
+				draw_rect(Rect2(-TRAFFIC_W * 0.5 + 8.0, TRAFFIC_H * 0.5 - 48.0, TRAFFIC_W - 16.0, 30.0), COL_TRAFFIC_DARK)
 			draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 		elif ht == "jump":
 			var jw: float = float(h.get("w", JUMP_W))
@@ -1738,8 +1981,11 @@ func _draw() -> void:
 			sc = 1.0 + hop * 0.18
 			draw_circle(Vector2(_sx(car_x), CAR_Y), CAR_HALF_W * 1.1, Color(0, 0, 0, 0.25))
 		draw_set_transform(Vector2(_sx(car_x), CAR_Y - lift), ang, Vector2(sc, sc))
-		draw_rect(Rect2(-CAR_HALF_W, -CAR_HALF_H, CAR_W, CAR_H), col_car)
-		draw_rect(Rect2(-CAR_HALF_W + 8.0, -CAR_HALF_H + 18.0, CAR_W - 16.0, 30.0), col_car_dark)
+		if _tex_car != null:
+			draw_texture_rect(_tex_car, Rect2(-CAR_HALF_W, -CAR_HALF_H, CAR_W, CAR_H), false)
+		else:
+			draw_rect(Rect2(-CAR_HALF_W, -CAR_HALF_H, CAR_W, CAR_H), col_car)
+			draw_rect(Rect2(-CAR_HALF_W + 8.0, -CAR_HALF_H + 18.0, CAR_W - 16.0, 30.0), col_car_dark)
 		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 	# explosion
@@ -1845,6 +2091,7 @@ func _draw_road() -> void:
 	if not any_branch:
 		var left := PackedVector2Array()
 		var right := PackedVector2Array()
+		var vs := PackedFloat32Array()
 		var centers: Array = []
 		var y := 0.0
 		while y <= SCREEN_H:
@@ -1853,9 +2100,10 @@ func _draw_road() -> void:
 			var hw := road_half_width(d)
 			left.append(Vector2(_sx(c - hw), y))
 			right.append(Vector2(_sx(c + hw), y))
+			vs.append(d / ROAD_TEX_TILE)
 			centers.append(Vector3(_sx(c), y, d))
 			y += step
-		_fill_band(left, right)
+		_fill_band(left, right, vs)
 		draw_polyline(left, col_edge, 5.0, true)
 		draw_polyline(right, col_edge, 5.0, true)
 		_draw_dashes(centers)
@@ -1871,6 +2119,7 @@ func _draw_road() -> void:
 	var r1 := PackedVector2Array()
 	var cen0: Array = []
 	var cen1: Array = []
+	var vs := PackedFloat32Array()
 	var open := PackedInt32Array()
 	var yy := 0.0
 	while yy <= SCREEN_H:
@@ -1886,33 +2135,55 @@ func _draw_road() -> void:
 		r1.append(Vector2(_sx(c1 + hw1), yy))
 		cen0.append(Vector3(_sx(c0), yy, d))
 		cen1.append(Vector3(_sx(c1), yy, d))
+		vs.append(d / ROAD_TEX_TILE)
 		open.append(1 if (c1 - hw1) > (c0 + hw0) + 4.0 else 0)
 		yy += step
-	_fill_band(l0, r0)
-	_fill_band(l1, r1)
+	_fill_band(l0, r0, vs)
+	_fill_band(l1, r1, vs)
 	draw_polyline(l0, col_edge, 5.0, true)   # outer-left  (always a boundary)
 	draw_polyline(r1, col_edge, 5.0, true)   # outer-right (always a boundary)
 	_draw_open_edge(r0, open)                # inner edges (median kerb) only where open
 	_draw_open_edge(l1, open)
-	_draw_median(r0, l1, open, cen0)         # hazard chevrons + painted nose in the median
+	_draw_median(r0, l1, open)               # painted nose caps at the gore tips
 	_draw_dashes(cen0)
 	_draw_dashes(cen1)
 
 
-func _fill_band(left: PackedVector2Array, right: PackedVector2Array) -> void:
+# Fills a road band, textured (tiling along its length via the vs/UV-v values when
+# a road texture is loaded) or flat-coloured otherwise.
+func _fill_band(left: PackedVector2Array, right: PackedVector2Array, vs := PackedFloat32Array()) -> void:
 	var poly := PackedVector2Array()
 	poly.append_array(left)
 	for i in range(right.size() - 1, -1, -1):
 		poly.append(right[i])
-	draw_colored_polygon(poly, col_road)
+	if _tex_road != null and vs.size() == left.size() and left.size() == right.size():
+		var uvs := PackedVector2Array()
+		for i in range(left.size()):
+			uvs.append(Vector2(0.0, vs[i]))
+		for i in range(right.size() - 1, -1, -1):
+			uvs.append(Vector2(1.0, vs[i]))
+		draw_colored_polygon(poly, Color.WHITE, uvs, _tex_road)
+	else:
+		draw_colored_polygon(poly, col_road)
 
 
+# Centre line. Off-road / track themes paint none. Each dash is drawn as ONE
+# grouped polyline over its "on" run instead of a stack of tiny per-sample lines —
+# that overlap of antialiased stubs was what made the old stripes blotchy on bends.
 func _draw_dashes(centers: Array) -> void:
-	for i in range(centers.size() - 1):
-		var p0: Vector3 = centers[i]
-		var p1: Vector3 = centers[i + 1]
-		if fposmod(p0.z, DASH_PERIOD) < DASH_PERIOD * 0.5:
-			draw_line(Vector2(p0.x, p0.y), Vector2(p1.x, p1.y), col_dash, 5.0, true)
+	if not _theme_stripes:
+		return
+	var seg := PackedVector2Array()
+	for i in range(centers.size()):
+		var p: Vector3 = centers[i]
+		if fposmod(p.z, DASH_PERIOD) < DASH_PERIOD * 0.5:
+			seg.append(Vector2(p.x, p.y))
+		else:
+			if seg.size() >= 2:
+				draw_polyline(seg, col_dash, 5.0, true)
+			seg = PackedVector2Array()
+	if seg.size() >= 2:
+		draw_polyline(seg, col_dash, 5.0, true)
 
 
 # Draws an inner (median) edge only across rows where the median is open,
@@ -1932,10 +2203,10 @@ func _draw_open_edge(pts: PackedVector2Array, open: PackedInt32Array) -> void:
 		draw_polyline(seg, col_edge, 5.0, true)
 
 
-# Marks the grass median where the road forks: hazard chevrons pointing back at
-# the driver down each open run, plus a bright painted nose cap at each tip — so
-# the split reads as an intentional road feature rather than a gap.
-func _draw_median(r0: PackedVector2Array, l1: PackedVector2Array, open: PackedInt32Array, cen: Array) -> void:
+# Marks the grass median where the road forks with a small painted nose cap at
+# each tip of an open run, so the split reads as an intentional road feature. (The
+# old hazard chevrons down the gore read as obstacles and were removed.)
+func _draw_median(r0: PackedVector2Array, l1: PackedVector2Array, open: PackedInt32Array) -> void:
 	var n := open.size()
 	var i := 0
 	while i < n:
@@ -1945,24 +2216,50 @@ func _draw_median(r0: PackedVector2Array, l1: PackedVector2Array, open: PackedIn
 		var j := i
 		while j < n and open[j] == 1:
 			j += 1
-		# one chevron per period of distance down this open run
-		var last := 1.0e20
-		for k in range(i, j):
-			var p: Vector3 = cen[k]
-			if last - p.z >= FORK_CHEVRON_PERIOD:
-				last = p.z
-				var rx := r0[k].x
-				var lx := l1[k].x
-				var w := (lx - rx) * 0.33
-				if w > 5.0:
-					var cx := (rx + lx) * 0.5
-					var y := r0[k].y
-					draw_line(Vector2(cx - w, y - 13.0), Vector2(cx, y), col_dash, 3.0, true)
-					draw_line(Vector2(cx + w, y - 13.0), Vector2(cx, y), col_dash, 3.0, true)
-		# bright painted nose caps at both tips of the gore
 		draw_circle((r0[i] + l1[i]) * 0.5, 6.0, col_edge)
 		draw_circle((r0[j - 1] + l1[j - 1]) * 0.5, 6.0, col_edge)
 		i = j
+
+
+# Off-road background: a per-theme texture tiled with parallax scroll, or the flat
+# theme colour when no texture is present.
+func _draw_background() -> void:
+	if _tex_bg != null:
+		_draw_tiled(_tex_bg, camera_x * BG_TEX_PARALLAX, -distance * BG_TEX_PARALLAX)
+	else:
+		draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), col_offroad)
+
+
+# Tiles a texture across the whole screen at the given world-scroll offset, so it
+# works regardless of the texture's import/repeat flags.
+func _draw_tiled(tex: Texture2D, scroll_x: float, scroll_y: float) -> void:
+	var ts := tex.get_size()
+	if ts.x <= 0.0 or ts.y <= 0.0:
+		return
+	var y := -fposmod(scroll_y, ts.y)
+	while y < SCREEN_H:
+		var x := -fposmod(scroll_x, ts.x)
+		while x < SCREEN_W:
+			draw_texture(tex, Vector2(x, y))
+			x += ts.x
+		y += ts.y
+
+
+# Background props: per-theme sprite for the variant, else the primitive stand-in.
+func _draw_decos() -> void:
+	for deco in _decos:
+		var dy := CAR_Y - (float(deco["d"]) - distance)
+		if dy < -90.0 or dy > SCREEN_H + 90.0:
+			continue
+		var pos := Vector2(_sx(float(deco["x"])), dy)
+		var variant := int(deco["variant"])
+		var s := float(deco["scale"])
+		if _tex_deco.size() > 0:
+			var tex: Texture2D = _tex_deco[variant % _tex_deco.size()]
+			var sz := tex.get_size() * s
+			draw_texture_rect(tex, Rect2(pos - sz * 0.5, sz), false)
+		else:
+			_draw_deco_primitive(pos, variant, s)
 
 
 func _draw_parallax() -> void:
