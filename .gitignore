@@ -1,0 +1,6 @@
+# Godot 4+ import cache (regenerated automatically on editor open / first import)
+.godot/
+
+# Editor / OS noise
+*.tmp
+.DS_Store

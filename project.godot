@@ -22,3 +22,8 @@ window/size/viewport_height=1280
 window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
 window/handheld/orientation=1
+
+[rendering]
+
+; crisp, unfiltered sprites/fonts to match the 16-bit / retro pixel-art direction
+textures/canvas_textures/default_texture_filter=0
