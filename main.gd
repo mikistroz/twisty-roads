@@ -227,6 +227,7 @@ const SAVE_PATH := "user://twisty_roads.cfg"
 # unnumbered single file. Lists let a theme ship several car/prop variants.
 const ART_DIR := "res://art/"
 const ART_EXTS := ["png", "webp", "jpg", "jpeg", "svg"]
+const ART_LIST_MAX := 32   # highest slot_N index scanned for a numbered series (gaps OK)
 const ROAD_TEX_TILE := 220.0      # world-distance the road texture spans before repeating
 const BG_TEX_PARALLAX := 0.45     # how much the background texture scrolls vs the world
 
@@ -512,19 +513,17 @@ func _load_tex(theme_id: String, slot: String) -> Texture2D:
 
 # A slot may ship as a single file (slot.png) or a numbered series
 # (slot_0.png, slot_1.png, ...). Returns the theme's own set, else the default's.
+# Numbering may have gaps — slot_1.png alone (no slot_0.png) still loads.
 func _load_tex_list(theme_id: String, slot: String) -> Array[Texture2D]:
 	for tid in [theme_id, "default"]:
 		var out: Array[Texture2D] = []
 		var single := _load_tex_exact(tid, slot)
 		if single != null:
 			out.append(single)
-		var i := 0
-		while true:
+		for i in range(ART_LIST_MAX):
 			var t := _load_tex_exact(tid, "%s_%d" % [slot, i])
-			if t == null:
-				break
-			out.append(t)
-			i += 1
+			if t != null:
+				out.append(t)
 		if out.size() > 0:
 			return out
 	return []
