@@ -11,8 +11,8 @@ extends Node2D
 
 # ---------------- layout ----------------
 const SCREEN_W := 720.0
-const SCREEN_H := 1280.0
-const CAR_Y := 980.0
+const SCREEN_H := 1280.0           # UI design height; gameplay uses the live _view_h
+const CAR_BOTTOM := 300.0          # the car sits this far up from the bottom of the view
 const CAR_W := 50.0
 const CAR_H := 90.0
 const CAR_HALF_W := CAR_W * 0.5
@@ -37,6 +37,7 @@ const MIN_HALF_WIDTH := 120.0
 const NARROW_PER_DIST := 0.0007   # road narrows by distance (visible ahead, fair)
 const RAMP_SECONDS := 220.0
 const INTRO_DIST := 1500.0        # straight, hazard-free start
+const MAX_STRAIGHT_RUN := 950.0   # it's "Twisty Roads": force a bend if the road runs this straight
 
 # Rhythm curve: periodic "breather" sections where the road widens (speed stays
 # linear — no slowdown).
@@ -49,6 +50,7 @@ const PX_PER_METER := 8.0
 # Jump = high-risk/high-reward: clear obstacles, +2 coins on landing, speed boost.
 const BOOST_MULT := 1.45
 const BOOST_TIME := 2.2
+const BOOST_WARN := 0.7           # last stretch of boost: flash + chirp so you know it's ending
 const JUMP_COINS := 2
 const NEAR_MISS_DX := 94.0        # lateral gap that counts as a near miss (crash is ~44)
 const NEAR_MISS_COINS := 2
@@ -79,14 +81,16 @@ const DASH_PERIOD := 90.0
 # centerline, which is what lets the road split without the centerline having to
 # be multi-valued.
 const BRANCH_SPACING := 7000.0    # min gap between one fork ending and the next starting
-const FORK_LEN_MIN := 1300.0
-const BRANCH_RAMP := 0.22         # fraction of a fork's length spent splitting / merging
+const FORK_LEN_MIN := 700.0       # forks are short, technical sections — not long straights
+const FORK_LEN_MAX := 1500.0      # hard ceiling so even the widest early fork stays short
+const BRANCH_RAMP := 0.30         # fraction of a fork's length spent splitting / merging
 const LANE_FRAC := 0.62           # split-lane half-width as a fraction of the local road
-const LANE_HW_MIN := 76.0
-const FORK_MEDIAN_FRAC := 0.2     # fork median half-width as a fraction of the local road
-const FORK_SWEEP_CAP := 320.0     # how fast lanes may peel apart; lower => longer, gentler forks a player can still track at boosted top speed
-const BRANCH_STRAIGHT_DELTA := 70.0  # entry must be at least this straight (per 300px)
-const BRANCH_MAX_DRIFT := 280.0   # max sideways drift of the road across a fork (chord stays gentle)
+const LANE_HW_MIN := 84.0         # lanes never narrower than this (keeps a passing corridor + steer room)
+const LANE_HW_MAX := 98.0         # ...nor wider than this, so wide early roads still make SHORT forks
+const FORK_MEDIAN_FRAC := 0.12    # fork median half-width as a fraction of the local road
+const FORK_SWEEP_CAP := 320.0     # peak sideways peel speed of a lane; forks are sized so this holds at the (non-boosted) top speed they're driven at
+const BRANCH_STRAIGHT_DELTA := 48.0  # entry must be at least this straight (per 300px)
+const BRANCH_MAX_DRIFT := 150.0   # max sideways drift of the road across a fork; small => the straightened chord barely deviates, so the axis transient stays gentle on short forks
 const BRANCH_COINS := 4           # coins seeded along the scenic lane
 
 # Fork variety: a branch picks a STYLE and randomises its geometry so no two read
@@ -94,23 +98,27 @@ const BRANCH_COINS := 4           # coins seeded along the scenic lane
 # separation, width and split-ramp), so a fork can be a clean mirror split or a
 # lopsided one (a fat lane beside a thin one). Length varies too — a longer fork
 # only peels more gently, so it stays within the sweep cap and is always fair.
-const FORK_LEN_VARY_MAX := 1.85   # fork length multiplier (>=1 keeps peel within the sweep cap)
+const FORK_LEN_VARY_MAX := 1.25   # fork length multiplier (>=1 keeps peel within the sweep cap)
 const FORK_OFF_VARY := 0.30       # +/- fraction jittered onto each lane's separation
 const FORK_HW_VARY := 0.22        # +/- fraction jittered onto each lane's half-width
-const FORK_RAMP_VARY := 0.45      # +/- fraction jittered onto each lane's split ramp
+const FORK_RAMP_VARY := 0.25      # +/- fraction jittered onto each lane's split ramp
 const FORK_ASYM_CHANCE := 0.5     # chance a fork is lopsided rather than mirror-symmetric
 const SHOULDER_CHANCE := 0.4      # chance a branch is a bailout shoulder instead of a fork
 
-# Forks aren't dead-straight chords any more: a gentle sideways WAVE (faded in/out
-# at the merges so it stays seamless) makes the split wind, and each fork can carry
-# OIL slicks in its lanes so committing to one is a real test, not a cruise. The
-# wave is kept small enough that a lane never moves sideways faster than the player
-# can track, even stacked on top of the split peel.
-const FORK_WAVE_AMP := 14.0       # max sideways wander added across a fork
-const FORK_WAVE_LEN := 1050.0     # wavelength of that wander
+# Forks aren't dead-straight cruises: a gentle sideways WAVE (faded in/out at the
+# merges so it stays seamless) makes the split wind, and each fork is seeded with
+# avoidable TRAFFIC (cars that hug one side of a lane, leaving a clean passing gap
+# that never closes) plus the odd OIL slick — so committing to a side is a real
+# test. The wave is kept small enough that a lane never moves sideways faster than
+# the player can track at the speed forks are driven at.
+const FORK_WAVE_AMP := 8.0        # max sideways wander added across a fork
+const FORK_WAVE_LEN := 820.0      # wavelength of that wander
 const FORK_WAVE_CHANCE := 0.8     # chance a fork winds rather than running straight
-const FORK_OIL_CHANCE := 0.6      # chance a fork is seeded with oil slicks
-const FORK_OIL_MAX := 3           # up to this many oil slicks across a fork's lanes
+const FORK_OIL_CHANCE := 0.4      # chance a fork is seeded with oil slicks
+const FORK_OIL_MAX := 2           # up to this many oil slicks across a fork's lanes
+const FORK_TRAFFIC_CHANCE := 0.8  # chance a fork is seeded with avoidable traffic
+const FORK_TRAFFIC_MAX := 2       # up to this many cars across a fork's lanes
+const FORK_TRAFFIC_GAP := 46.0    # passing room (car-center) a fork car must leave to be placed
 
 # Bailout shoulder: the main road stays full width and a narrower coin lane
 # sprouts from ONE shoulder, bulges out around a grass median, then merges back —
@@ -305,6 +313,13 @@ var _pt_x := PackedFloat32Array()
 var _track_frontier_d := 0.0
 var _track_last_x := ROAD_CENTER_X
 var _bias := 0.0
+# responsive layout: gameplay fills the real viewport height (width stays 720 via
+# the "expand" stretch), so the game fits every phone aspect (see _relayout)
+var _view_w := SCREEN_W
+var _view_h := SCREEN_H
+var _car_y := SCREEN_H - CAR_BOTTOM
+var _gen_ahead := 1400.0           # how far ahead to generate (covers the visible road)
+var _straight_run := 0.0           # distance since the road last took a real bend
 var _pattern_queue: Array = []
 
 # forks layered on the centerline (see FORKS section)
@@ -325,6 +340,7 @@ var _exhaust_accum := 0.0
 var _oil_timer := 0.0
 var _air_timer := 0.0
 var _boost_timer := 0.0
+var _boost_warned := false         # has the "boost ending" cue fired for this boost?
 var _crash_timer := 0.0
 var _count_timer := 0.0
 var _popups: Array = []
@@ -337,14 +353,15 @@ var _ui_font: Font
 # Engine is two crossfaded loops (engine_low/engine_high) rather than one
 # loop with a wide pitch shift, so going fast changes the engine's timbre
 # instead of just speeding up its pitch — avoids the droney/chipmunk effect.
-# Expected slots: crash, coin, land, near_miss, jump, smash, oil_squeal, horn,
-# purchase, challenge, ui_tap, engine_low, engine_high.
+# Expected slots: crash, coin, land, near_miss, jump, smash, boost_end,
+# oil_squeal, horn, purchase, challenge, ui_tap, engine_low, engine_high.
 var _sfx_crash: AudioStreamPlayer
 var _sfx_coin: AudioStreamPlayer
 var _sfx_land: AudioStreamPlayer
 var _sfx_near_miss: AudioStreamPlayer
 var _sfx_jump: AudioStreamPlayer
 var _sfx_smash: AudioStreamPlayer
+var _sfx_boost_end: AudioStreamPlayer
 var _sfx_oil: AudioStreamPlayer
 var _sfx_beep: AudioStreamPlayer
 var _sfx_purchase: AudioStreamPlayer
@@ -387,7 +404,37 @@ func _ready() -> void:
 	_apply_theme(selected)
 	_build_audio()
 	_build_ui()
+	_relayout()
+	var vp := get_viewport()
+	if vp != null:
+		vp.size_changed.connect(_relayout)
 	_goto_menu()
+
+
+# Fit gameplay + UI to the device's screen aspect. Width is locked to 720 by the
+# "expand" stretch; the height is whatever that yields, so the car drives a fixed
+# distance up from the real bottom, we generate enough road to fill the view, and
+# the menu panels are vertically centred (the HUD stays anchored to the top).
+func _relayout() -> void:
+	if not is_inside_tree():
+		return
+	var vp := get_viewport_rect().size
+	if vp.x <= 0.0 or vp.y <= 0.0:
+		return
+	_view_w = vp.x
+	_view_h = vp.y
+	_car_y = _view_h - CAR_BOTTOM
+	_gen_ahead = maxf(1400.0, _car_y + 200.0)
+	# centre the menu panels in whatever extra space the device aspect gives us;
+	# never negative, so on a screen shorter than the design height the menu tops
+	# stay on-screen rather than clipping. The HUD only shifts horizontally.
+	var off := Vector2(maxf(0.0, (_view_w - SCREEN_W) * 0.5), maxf(0.0, (_view_h - SCREEN_H) * 0.5))
+	for p in [_menu, _store, _challenges, _pause, _gameover]:
+		if p != null:
+			p.position = off
+	if _hud != null:
+		_hud.position = Vector2(off.x, 0.0)
+	queue_redraw()
 
 
 # ============================================================
@@ -520,6 +567,7 @@ func _build_audio() -> void:
 	_sfx_near_miss = _make_player("near_miss", "Master", -2.0)
 	_sfx_jump = _make_player("jump", "Master", -2.0)
 	_sfx_smash = _make_player("smash", "Master", -1.0)
+	_sfx_boost_end = _make_player("boost_end", "Master", -3.0)
 	_sfx_oil = _make_player("oil_squeal", "Master", -3.0)
 	_sfx_beep = _make_player("horn", "Master", -6.0)
 	_sfx_purchase = _make_player("purchase", "Master", -3.0)
@@ -657,6 +705,7 @@ func _reset_world() -> void:
 	_oil_timer = 0.0
 	_air_timer = 0.0
 	_boost_timer = 0.0
+	_boost_warned = false
 	_crash_timer = 0.0
 	_count_timer = 0.0
 	_bias = 0.0
@@ -713,11 +762,11 @@ func _start_run() -> void:
 	_reset_world()
 	_engine_low.stop()
 	_engine_high.stop()
-	_ensure_track(distance + 1400.0)
-	_ensure_branches(distance + 1400.0)
-	_ensure_hazards(distance + 1400.0)
-	_ensure_coins(distance + 1400.0)
-	_ensure_decos(distance + 1400.0)
+	_ensure_track(distance + _gen_ahead)
+	_ensure_branches(distance + _gen_ahead)
+	_ensure_hazards(distance + _gen_ahead)
+	_ensure_coins(distance + _gen_ahead)
+	_ensure_decos(distance + _gen_ahead)
 	_hud_score.text = "0"
 	_hud_coins.text = "Coins: 0"
 	_hud_prompt.visible = true
@@ -751,7 +800,7 @@ func _crash() -> void:
 	state = State.CRASH
 	_crash_timer = CRASH_TIME
 	Input.vibrate_handheld(220)
-	_spawn_explosion(_sx(car_x), CAR_Y)
+	_spawn_explosion(_sx(car_x), _car_y)
 	_engine_low.stop()
 	_engine_high.stop()
 	_play_sfx(_sfx_crash)
@@ -919,11 +968,11 @@ func _update_play(delta: float) -> void:
 	distance += current_speed() * delta
 	_update_engine_audio()
 
-	_ensure_track(distance + 1400.0)
-	_ensure_branches(distance + 1400.0)
-	_ensure_hazards(distance + 1400.0)
-	_ensure_coins(distance + 1400.0)
-	_ensure_decos(distance + 1400.0)
+	_ensure_track(distance + _gen_ahead)
+	_ensure_branches(distance + _gen_ahead)
+	_ensure_hazards(distance + _gen_ahead)
+	_ensure_coins(distance + _gen_ahead)
+	_ensure_decos(distance + _gen_ahead)
 	_drop_old()
 
 	# camera follows the car (with a little look-ahead toward the upcoming road)
@@ -937,6 +986,11 @@ func _update_play(delta: float) -> void:
 		_oil_timer -= delta
 	if _boost_timer > 0.0:
 		_boost_timer -= delta
+		# cue the player that boost (and its smash-through power) is about to lapse
+		if not _boost_warned and _boost_timer > 0.0 and _boost_timer < BOOST_WARN:
+			_boost_warned = true
+			_play_sfx(_sfx_boost_end)
+			Input.vibrate_handheld(25)
 	if airborne:
 		_air_timer -= delta
 		if _air_timer <= 0.0:
@@ -944,7 +998,8 @@ func _update_play(delta: float) -> void:
 			Input.vibrate_handheld(60)
 			session_coins += JUMP_COINS
 			_boost_timer = BOOST_TIME
-			_add_popup(_sx(car_x), CAR_Y - 30.0, "+%d" % JUMP_COINS, true)
+			_boost_warned = false
+			_add_popup(_sx(car_x), _car_y - 30.0, "+%d" % JUMP_COINS, true)
 			_play_sfx(_sfx_land)
 
 	if airborne:
@@ -972,11 +1027,10 @@ func _update_play(delta: float) -> void:
 	if _no_coin_timer > _no_coin_best:
 		_no_coin_best = _no_coin_timer
 
-	# Ramp boost makes the car unstoppable: it ploughs through blockers/traffic
-	# (see _update_hazards) AND rides straight over the off-road, so a fork that
-	# peels faster than you can steer at boosted top speed never punishes you. The
-	# jump-the-gap hole is the one thing boost can't cheat — you still must ramp it.
-	if not airborne and _boost_timer <= 0.0 and not _on_any_lane(distance, car_x):
+	# Boost only lets you smash THROUGH objects (see _update_hazards) — it grants no
+	# immunity to driving off the road. A fork caps your speed to the non-boosted top
+	# speed (see current_speed) so a boosted peel can never out-run your steering.
+	if not airborne and not _on_any_lane(distance, car_x):
 		_crash()
 		return
 
@@ -998,7 +1052,7 @@ func _update_play(delta: float) -> void:
 			if _streak > _streak_best:
 				_streak_best = _streak
 			_no_coin_timer = 0.0
-			_add_popup(_sx(cx), CAR_Y - (cd - distance), "+1", true)
+			_add_popup(_sx(cx), _car_y - (cd - distance), "+1", true)
 			_play_sfx(_sfx_coin)
 		elif cd < distance - (COL_HALF_H + COIN_R) and not coin.get("missed", false):
 			coin["missed"] = true
@@ -1125,7 +1179,7 @@ func _smash_hazard(h: Dictionary) -> void:
 	h["dead"] = true
 	session_coins += RAM_COINS
 	var sxp := _sx(float(h["x"]))
-	var syp := CAR_Y - (float(h["d"]) - distance)
+	var syp := _car_y - (float(h["d"]) - distance)
 	_spawn_explosion(sxp, syp)
 	_add_popup(sxp, syp - 24.0, "SMASH! +%d" % RAM_COINS, true, 240.0, true)
 	Input.vibrate_handheld(40)
@@ -1142,12 +1196,22 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 			# closing speed scales with the player's speed (enemies get faster too)
 			h["d"] = float(h["d"]) - current_speed() * float(h["spd"]) * delta
 			var td := float(h["d"])
-			var hwt := road_half_width(td)
-			var tgt := road_center(td) + float(h["lane"]) * hwt
 			var oldx := float(h["x"])
-			var nx := move_toward(oldx, tgt, TRAFFIC_LAT_SPEED * delta)
-			# keep it on an actual lane (matters through forks)
-			nx = _clamp_to_nearest_lane(td, nx)
+			var nx: float
+			if h.get("in_fork", false):
+				# fork traffic holds its lane and the edge it hugs, so the passing
+				# gap never closes — committed-but-avoidable rather than a trap
+				var fb := _branch_at(td)
+				if not fb.is_empty() and String(fb.get("kind", "")) == "fork":
+					var fl: Dictionary = fb["lane%d" % int(h["fork_lane"])]
+					var fg := _lane_geom(fb, fl, td, _branch_axis(fb, td), road_half_width(td))
+					nx = float(fg["c"]) + float(h["fork_side"]) * maxf(float(fg["hw"]) - TRAFFIC_W * 0.5 - 2.0, 0.0)
+				else:
+					nx = oldx   # past the fork's ends: just carry on straight
+			else:
+				var tgt := road_center(td) + float(h["lane"]) * road_half_width(td)
+				nx = move_toward(oldx, tgt, TRAFFIC_LAT_SPEED * delta)
+				nx = _clamp_to_nearest_lane(td, nx)   # keep it on an actual lane
 			h["x"] = nx
 			h["ang"] = clampf((nx - oldx) / maxf(TRAFFIC_LAT_SPEED * delta, 0.001), -1.0, 1.0) * 0.4
 		var hd := float(h["d"])
@@ -1162,10 +1226,11 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 				_crash()
 				return
 			# near miss: squeezed past a static block without crashing -> reward
-			if not h["scored"] and dy < COL_HALF_H + BLOCK_H * 0.5 + 20.0 and dx < NEAR_MISS_DX:
+			# (never while ramming — a smash already paid out for this one)
+			if not ramming and not h["scored"] and dy < COL_HALF_H + BLOCK_H * 0.5 + 20.0 and dx < NEAR_MISS_DX:
 				h["scored"] = true
 				session_coins += NEAR_MISS_COINS
-				_add_popup(_sx(car_x), CAR_Y - 60.0, "Near Miss! +%d" % NEAR_MISS_COINS, true, 220.0, true)
+				_add_popup(_sx(car_x), _car_y - 60.0, "Near Miss! +%d" % NEAR_MISS_COINS, true, 220.0, true)
 				_play_sfx(_sfx_near_miss)
 		elif htype == "traffic":
 			if not airborne and dy < COL_HALF_H + TRAFFIC_H * 0.5 and dx < COL_HALF_W + TRAFFIC_W * 0.5:
@@ -1175,10 +1240,11 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 				_crash()
 				return
 			# near miss: passed close alongside without crashing -> reward
-			if not h["scored"] and dy < COL_HALF_H + 20.0 and dx < NEAR_MISS_DX:
+			# (never while ramming — a smash already paid out for this one)
+			if not ramming and not h["scored"] and dy < COL_HALF_H + 20.0 and dx < NEAR_MISS_DX:
 				h["scored"] = true
 				session_coins += NEAR_MISS_COINS
-				_add_popup(_sx(car_x), CAR_Y - 60.0, "Near Miss! +%d" % NEAR_MISS_COINS, true, 220.0, true)
+				_add_popup(_sx(car_x), _car_y - 60.0, "Near Miss! +%d" % NEAR_MISS_COINS, true, 220.0, true)
 				_play_sfx(_sfx_near_miss)
 			# random oncoming horn while the car is on screen ahead/behind
 			var bt: float = float(h.get("beep_t", randf_range(0.8, 2.4))) - delta
@@ -1212,7 +1278,7 @@ func _emit_exhaust(delta: float) -> void:
 	_exhaust_accum += delta
 	while _exhaust_accum > 0.04:
 		_exhaust_accum -= 0.04
-		var rear := Vector2(_sx(car_x) + randf_range(-6.0, 6.0), CAR_Y + CAR_HALF_H * 0.7)
+		var rear := Vector2(_sx(car_x) + randf_range(-6.0, 6.0), _car_y + CAR_HALF_H * 0.7)
 		var vel := Vector2(randf_range(-14.0, 14.0), randf_range(36.0, 70.0))
 		_particles.append({ "pos": rear, "vel": vel, "age": 0.0, "life": randf_range(0.4, 0.7), "r": randf_range(3.0, 6.0) })
 
@@ -1303,7 +1369,13 @@ func _breather(d: float) -> float:
 func current_speed() -> float:
 	var s := _ramp_speed()
 	if _boost_timer > 0.0:
-		s *= BOOST_MULT
+		# Inside a FORK, boost adds no speed: forks are sized to be trackable at the
+		# non-boosted top speed, so this is what keeps a peeling lane fair without
+		# any off-road immunity. You can still smash through fork traffic. Shoulders
+		# keep their full-width safe lane, so they stay boosted.
+		var b := _branch_at(distance)
+		if b.is_empty() or String(b.get("kind", "")) != "fork":
+			s *= BOOST_MULT
 	return s
 
 
@@ -1335,6 +1407,7 @@ func _reset_track() -> void:
 	_pt_x.append(ROAD_CENTER_X)
 	_track_frontier_d = 0.0
 	_track_last_x = ROAD_CENTER_X
+	_straight_run = 0.0
 	_pattern_queue.clear()
 
 
@@ -1349,8 +1422,18 @@ func _slope_cap() -> float:
 	return lerpf(0.45, 0.85, _turn_factor())
 
 
+# Force a definite bend (used when the road has run straight for too long). A
+# sweep out and a partial ease-back, slope-capped like everything else so it stays
+# followable on the wide road.
+func _force_turn() -> void:
+	var dir := 1.0 if randf() < 0.5 else -1.0
+	var amp := randf_range(200.0, 320.0) * lerpf(0.7, 1.0, _turn_factor())
+	_pattern_queue.append({ "x": _track_last_x + dir * amp })
+	_pattern_queue.append({ "x": _track_last_x + dir * amp * 0.35 })
+
+
 func _maybe_seed_pattern() -> void:
-	if randf() < 0.5:
+	if randf() < 0.32:
 		return
 	var base := _track_last_x
 	var amp_scale := lerpf(0.6, 1.0, _turn_factor())
@@ -1391,12 +1474,16 @@ func _ensure_track(up_to: float) -> void:
 		var tf := _turn_factor()
 		var target := _track_last_x
 		if _pattern_queue.is_empty():
-			_maybe_seed_pattern()
+			# gone too long without a real bend? force one — this is Twisty Roads
+			if _straight_run > MAX_STRAIGHT_RUN:
+				_force_turn()
+			else:
+				_maybe_seed_pattern()
 
 		if _pattern_queue.is_empty():
 			# drift gives the road momentum so it travels somewhere
-			_bias = clampf(_bias * 0.92 + randf_range(-26.0, 26.0), -140.0, 140.0)
-			var mag := randf_range(70.0, lerpf(150.0, 240.0, tf))
+			_bias = clampf(_bias * 0.92 + randf_range(-30.0, 30.0), -150.0, 150.0)
+			var mag := randf_range(110.0, lerpf(180.0, 250.0, tf))
 			var dir := 1.0
 			if randf() < 0.5:
 				dir = -1.0
@@ -1409,6 +1496,8 @@ func _ensure_track(up_to: float) -> void:
 		# and you have time to steer into it
 		var move := absf(target - _track_last_x)
 		var seg_len := maxf(lerpf(220.0, 150.0, tf), move / _slope_cap())
+		# track how far the road has run nearly straight, so we can force a bend
+		_straight_run = 0.0 if move > 95.0 else _straight_run + seg_len
 		_push_point(seg_len * randf_range(0.95, 1.1), target)
 
 
@@ -1543,11 +1632,34 @@ func _in_branch(d: float) -> bool:
 	return not _branch_at(d).is_empty()
 
 
+# True if the car's footprint lies entirely on the painted road surface. Lane
+# surfaces are merged into continuous spans first, so where two fork lanes are
+# close enough that their edges touch (the gore tapering shut) a car bridging them
+# still counts as on-road. Collisions therefore happen only on real contact with a
+# visible edge — never on a phantom median that closed before the lanes met.
 func _on_any_lane(d: float, x: float) -> bool:
-	for lane in road_lanes(d):
-		if absf(x - float(lane["c"])) <= float(lane["hw"]) - COL_HALF_W:
+	var lo := x - COL_HALF_W
+	var hi := x + COL_HALF_W
+	for span in _road_spans(d):
+		if lo >= span.x - 0.01 and hi <= span.y + 0.01:
 			return true
 	return false
+
+
+# Lane surfaces at d as sorted [left,right] spans (Vector2), with overlapping or
+# touching lanes merged into one span.
+func _road_spans(d: float) -> Array:
+	var ivs: Array = []
+	for lane in road_lanes(d):
+		ivs.append(Vector2(float(lane["c"]) - float(lane["hw"]), float(lane["c"]) + float(lane["hw"])))
+	ivs.sort_custom(func(a, b): return a.x < b.x)
+	var merged: Array = []
+	for iv in ivs:
+		if merged.is_empty() or iv.x > float(merged[-1].y):
+			merged.append(iv)
+		else:
+			merged[-1] = Vector2(float(merged[-1].x), maxf(float(merged[-1].y), iv.y))
+	return merged
 
 
 func _nearest_lane_center(d: float, x: float) -> float:
@@ -1605,25 +1717,29 @@ func _ensure_branches(up_to: float) -> void:
 # two forks peel apart the same way or for the same distance.
 func _make_fork(d0: float, rhw: float) -> Dictionary:
 	var asym := randf() < FORK_ASYM_CHANCE
-	var base_hw := clampf(rhw * LANE_FRAC, LANE_HW_MIN, rhw - 6.0)
+	var hw_cap := minf(rhw - 6.0, LANE_HW_MAX)   # cap width so wide roads still make short forks
+	var base_hw := clampf(rhw * LANE_FRAC, LANE_HW_MIN, hw_cap)
 	var base_med := rhw * FORK_MEDIAN_FRAC
 	# per-lane jitter (a symmetric fork keeps both sides equal; a lopsided one does
 	# not). Each lane's separation is its own width PLUS a jittered median, so the
 	# grass gap between the lanes is always positive however the sides are jittered.
-	var hw_l := clampf(base_hw * (1.0 + (randf_range(-FORK_HW_VARY, FORK_HW_VARY) if asym else 0.0)), LANE_HW_MIN, rhw - 6.0)
-	var hw_r := clampf(base_hw * (1.0 + (randf_range(-FORK_HW_VARY, FORK_HW_VARY) if asym else 0.0)), LANE_HW_MIN, rhw - 6.0)
+	var hw_l := clampf(base_hw * (1.0 + (randf_range(-FORK_HW_VARY, FORK_HW_VARY) if asym else 0.0)), LANE_HW_MIN, hw_cap)
+	var hw_r := clampf(base_hw * (1.0 + (randf_range(-FORK_HW_VARY, FORK_HW_VARY) if asym else 0.0)), LANE_HW_MIN, hw_cap)
 	var med_l := maxf(base_med * (1.0 + (randf_range(-FORK_OFF_VARY, FORK_OFF_VARY) if asym else 0.0)), 8.0)
 	var med_r := maxf(base_med * (1.0 + (randf_range(-FORK_OFF_VARY, FORK_OFF_VARY) if asym else 0.0)), 8.0)
 	var off_l := hw_l + med_l
 	var off_r := hw_r + med_r
 	var ramp_l := BRANCH_RAMP * (1.0 + (randf_range(-FORK_RAMP_VARY, FORK_RAMP_VARY) if asym else 0.0))
 	var ramp_r := BRANCH_RAMP * (1.0 + (randf_range(-FORK_RAMP_VARY, FORK_RAMP_VARY) if asym else 0.0))
-	# length: keep even the widest, fastest-peeling lane within the sweep cap, then
-	# stretch it by a random factor (longer only ever peels more gently — still fair)
+	# length: keep even the widest, fastest-peeling lane within the sweep cap at the
+	# TOP SPEED a fork is driven at (non-boosted — current_speed() caps boost inside
+	# forks), then stretch it by a small random factor. Sizing for MAX_SPEED instead
+	# of the boosted speed is what lets forks stay short without ever out-peeling your
+	# steering.
 	var max_off := maxf(off_l, off_r)
 	var min_ramp := clampf(minf(ramp_l, ramp_r), 0.05, 0.5)
-	var min_len := maxf(FORK_LEN_MIN, max_off * 1.5 * MAX_SPEED * BOOST_MULT / (min_ramp * FORK_SWEEP_CAP))
-	var fork_len := min_len * randf_range(1.0, FORK_LEN_VARY_MAX)
+	var min_len := maxf(FORK_LEN_MIN, max_off * 1.5 * MAX_SPEED / (min_ramp * FORK_SWEEP_CAP))
+	var fork_len := minf(min_len * randf_range(1.0, FORK_LEN_VARY_MAX), FORK_LEN_MAX)
 	# gentle wind: amplitude is held under what the player can still track once it is
 	# stacked on the split peel (verified in the fairness harness)
 	var wave_amp := 0.0
@@ -1689,30 +1805,47 @@ func _seed_branch_coins(b: Dictionary) -> void:
 
 
 # Scatter OIL slicks down a fork's lanes so committing to a side is a real test,
-# not a straight cruise. Oil only makes you slip (never blocks), so whichever lane
-# you pick is always passable — the fork stays fair while feeling alive.
+# not a straight cruise. Everything seeded here is AVOIDABLE within the lane you
+# commit to: oil only makes you slip (never blocks), and a fork car hugs one side
+# of its lane leaving a clean passing gap that it holds the whole way down — so
+# whichever side you pick is always drivable, the fork just demands real steering.
 func _seed_fork_hazards(b: Dictionary) -> void:
 	if String(b.get("kind", "")) != "fork":
 		return
-	if randf() > FORK_OIL_CHANCE:
-		return
 	var d0 := float(b["d0"])
 	var d1 := float(b["d1"])
-	for k in range(randi_range(1, FORK_OIL_MAX)):
-		var lane: Dictionary = b["lane%d" % (randi() % 2)]
-		var dd := lerpf(d0, d1, randf_range(0.28, 0.72))
-		var g := _lane_geom(b, lane, dd, _branch_axis(b, dd), road_half_width(dd))
-		# nudge within the lane so the slick isn't always dead-centre
-		var nudge := randf_range(-0.4, 0.4) * maxf(float(g["hw"]) - OIL_R * 0.5, 0.0)
-		_hazards.append({ "d": dd, "x": float(g["c"]) + nudge, "type": "oil", "lane": 0.0, "ang": 0.0, "hit": false, "in_fork": true })
+	# avoidable traffic, hugging one edge of a lane wide enough to pass
+	if randf() < FORK_TRAFFIC_CHANCE:
+		for k in range(randi_range(1, FORK_TRAFFIC_MAX)):
+			var li := randi() % 2
+			var lane: Dictionary = b["lane%d" % li]
+			var dd := lerpf(d0, d1, randf_range(0.30, 0.70))
+			var g := _lane_geom(b, lane, dd, _branch_axis(b, dd), road_half_width(dd))
+			var hw := float(g["hw"])
+			if 2.0 * hw - TRAFFIC_W < 2.0 * COL_HALF_W + FORK_TRAFFIC_GAP:
+				continue   # lane too thin here to leave a fair gap — skip
+			var side := 1.0 if randf() < 0.5 else -1.0
+			var off := side * maxf(hw - TRAFFIC_W * 0.5 - 2.0, 0.0)
+			_hazards.append({ "d": dd, "x": float(g["c"]) + off, "type": "traffic",
+				"lane": 0.0, "ang": 0.0, "hit": false, "scored": false,
+				"spd": randf_range(0.15, 0.4), "sprite": randi(),
+				"in_fork": true, "fork_lane": li, "fork_side": side })
+	# the odd oil slick on top
+	if randf() < FORK_OIL_CHANCE:
+		for k in range(randi_range(1, FORK_OIL_MAX)):
+			var lane2: Dictionary = b["lane%d" % (randi() % 2)]
+			var dd2 := lerpf(d0, d1, randf_range(0.28, 0.72))
+			var g2 := _lane_geom(b, lane2, dd2, _branch_axis(b, dd2), road_half_width(dd2))
+			var nudge := randf_range(-0.4, 0.4) * maxf(float(g2["hw"]) - OIL_R * 0.5, 0.0)
+			_hazards.append({ "d": dd2, "x": float(g2["c"]) + nudge, "type": "oil", "lane": 0.0, "ang": 0.0, "hit": false, "in_fork": true })
 
 
 func distance_at_row(y: float) -> float:
-	return distance + (CAR_Y - y)
+	return distance + (_car_y - y)
 
 
 func _sx(wx: float) -> float:
-	return wx - camera_x + SCREEN_W * 0.5
+	return wx - camera_x + _view_w * 0.5
 
 
 # ============================================================
@@ -1895,7 +2028,7 @@ func _draw() -> void:
 		return
 
 	for m in _tire_marks:
-		var my := CAR_Y - (float(m["d"]) - distance)
+		var my := _car_y - (float(m["d"]) - distance)
 		var a := 1.0 - float(m["age"]) / TIRE_LIFE
 		if a > 0.0:
 			var tc := COL_TIRE
@@ -1906,8 +2039,8 @@ func _draw() -> void:
 		if bool(h.get("dead", false)):
 			continue
 		var hd := float(h["d"])
-		var hy := CAR_Y - (hd - distance)
-		if hy < -160.0 or hy > SCREEN_H + 160.0:
+		var hy := _car_y - (hd - distance)
+		if hy < -160.0 or hy > _view_h + 160.0:
 			continue
 		var hx := _sx(float(h["x"]))
 		var ht: String = h["type"]
@@ -1948,8 +2081,8 @@ func _draw() -> void:
 	for coin in _coins:
 		if coin["got"]:
 			continue
-		var cy := CAR_Y - (float(coin["d"]) - distance)
-		if cy > -COIN_R and cy < SCREEN_H + COIN_R:
+		var cy := _car_y - (float(coin["d"]) - distance)
+		if cy > -COIN_R and cy < _view_h + COIN_R:
 			var cx := _sx(float(coin["x"]))
 			draw_circle(Vector2(cx, cy), COIN_R, COL_COIN)
 			draw_circle(Vector2(cx, cy), COIN_R * 0.55, COL_COIN_HI)
@@ -1965,12 +2098,14 @@ func _draw() -> void:
 
 	# car (hidden once it has exploded; shown frozen during the resume countdown)
 	if state == State.PLAYING or state == State.COUNTDOWN:
-		# boost glow
+		# boost glow — flashes faster and reddens in its final BOOST_WARN seconds so
+		# you can read at a glance whether the smash-through is still live
 		if _boost_timer > 0.0:
-			var pulse := 0.6 + 0.4 * sin(time_alive * 18.0)
-			var gcol := COL_BOOST
-			gcol.a = 0.35 * pulse
-			draw_circle(Vector2(_sx(car_x), CAR_Y), CAR_W * (0.95 + 0.12 * pulse), gcol)
+			var ending := _boost_timer < BOOST_WARN
+			var pulse := 0.6 + 0.4 * sin(time_alive * (46.0 if ending else 18.0))
+			var gcol := COL_BOOST.lerp(Color(1.0, 0.3, 0.22), 0.6) if ending else COL_BOOST
+			gcol.a = (0.5 if ending else 0.35) * pulse
+			draw_circle(Vector2(_sx(car_x), _car_y), CAR_W * (0.95 + 0.12 * pulse), gcol)
 		var ang := _car_angle()
 		var lift := 0.0
 		var sc := 1.0
@@ -1979,8 +2114,8 @@ func _draw() -> void:
 			var hop := sin(phase * PI)
 			lift = hop * 26.0
 			sc = 1.0 + hop * 0.18
-			draw_circle(Vector2(_sx(car_x), CAR_Y), CAR_HALF_W * 1.1, Color(0, 0, 0, 0.25))
-		draw_set_transform(Vector2(_sx(car_x), CAR_Y - lift), ang, Vector2(sc, sc))
+			draw_circle(Vector2(_sx(car_x), _car_y), CAR_HALF_W * 1.1, Color(0, 0, 0, 0.25))
+		draw_set_transform(Vector2(_sx(car_x), _car_y - lift), ang, Vector2(sc, sc))
 		if _tex_car != null:
 			draw_texture_rect(_tex_car, Rect2(-CAR_HALF_W, -CAR_HALF_H, CAR_W, CAR_H), false)
 		else:
@@ -2024,16 +2159,16 @@ func _draw() -> void:
 
 	# resume countdown
 	if state == State.COUNTDOWN:
-		draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), Color(0, 0, 0, 0.35))
+		draw_rect(Rect2(0, 0, SCREEN_W, _view_h), Color(0, 0, 0, 0.35))
 		if _ui_font != null:
 			var n := ceili(_count_timer)
-			draw_string(_ui_font, Vector2(0, SCREEN_H * 0.5), str(n), HORIZONTAL_ALIGNMENT_CENTER, SCREEN_W, 160, Color(1, 1, 1, 0.95))
+			draw_string(_ui_font, Vector2(0, _view_h * 0.5), str(n), HORIZONTAL_ALIGNMENT_CENTER, SCREEN_W, 160, Color(1, 1, 1, 0.95))
 
 	# crash flash
 	if state == State.CRASH:
 		var f := clampf((_crash_timer - (CRASH_TIME - 0.15)) / 0.15, 0.0, 1.0)
 		if f > 0.0:
-			draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), Color(1, 1, 1, f * 0.6))
+			draw_rect(Rect2(0, 0, SCREEN_W, _view_h), Color(1, 1, 1, f * 0.6))
 
 
 # The jump-the-gap hole: a void that follows the road across its length, with a
@@ -2048,7 +2183,7 @@ func _draw_gap(h: Dictionary, hd: float) -> void:
 	while dd <= g1 + 0.01:
 		var c := road_center(dd)
 		var hwd := road_half_width(dd)
-		var yy := CAR_Y - (dd - distance)
+		var yy := _car_y - (dd - distance)
 		left.append(Vector2(_sx(c - hwd), yy))
 		right.append(Vector2(_sx(c + hwd), yy))
 		dd += 6.0
@@ -2063,7 +2198,7 @@ func _draw_gap(h: Dictionary, hd: float) -> void:
 	var nhw := road_half_width(g0)
 	var lx := _sx(nc - nhw)
 	var rx := _sx(nc + nhw)
-	var ny := CAR_Y - (g0 - distance)
+	var ny := _car_y - (g0 - distance)
 	var sw := 22.0
 	var x := lx
 	var on := true
@@ -2079,7 +2214,7 @@ func _draw_gap(h: Dictionary, hd: float) -> void:
 # split lanes and lets the off-road show through the gap as the median.
 func _draw_road() -> void:
 	var step := 3.0   # finer sampling keeps the polyline smooth through sharp turns
-	var bot_d := distance_at_row(SCREEN_H)
+	var bot_d := distance_at_row(_view_h)
 	var top_d := distance_at_row(0.0)
 
 	var any_branch := false
@@ -2094,7 +2229,7 @@ func _draw_road() -> void:
 		var vs := PackedFloat32Array()
 		var centers: Array = []
 		var y := 0.0
-		while y <= SCREEN_H:
+		while y <= _view_h:
 			var d := distance_at_row(y)
 			var c := road_center(d)
 			var hw := road_half_width(d)
@@ -2122,7 +2257,7 @@ func _draw_road() -> void:
 	var vs := PackedFloat32Array()
 	var open := PackedInt32Array()
 	var yy := 0.0
-	while yy <= SCREEN_H:
+	while yy <= _view_h:
 		var d := distance_at_row(yy)
 		var lanes := road_lanes(d)
 		var c0 := float(lanes[0]["c"])
@@ -2227,7 +2362,7 @@ func _draw_background() -> void:
 	if _tex_bg != null:
 		_draw_tiled(_tex_bg, camera_x * BG_TEX_PARALLAX, -distance * BG_TEX_PARALLAX)
 	else:
-		draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), col_offroad)
+		draw_rect(Rect2(0, 0, SCREEN_W, _view_h), col_offroad)
 
 
 # Tiles a texture across the whole screen at the given world-scroll offset, so it
@@ -2237,7 +2372,7 @@ func _draw_tiled(tex: Texture2D, scroll_x: float, scroll_y: float) -> void:
 	if ts.x <= 0.0 or ts.y <= 0.0:
 		return
 	var y := -fposmod(scroll_y, ts.y)
-	while y < SCREEN_H:
+	while y < _view_h:
 		var x := -fposmod(scroll_x, ts.x)
 		while x < SCREEN_W:
 			draw_texture(tex, Vector2(x, y))
@@ -2248,8 +2383,8 @@ func _draw_tiled(tex: Texture2D, scroll_x: float, scroll_y: float) -> void:
 # Background props: per-theme sprite for the variant, else the primitive stand-in.
 func _draw_decos() -> void:
 	for deco in _decos:
-		var dy := CAR_Y - (float(deco["d"]) - distance)
-		if dy < -90.0 or dy > SCREEN_H + 90.0:
+		var dy := _car_y - (float(deco["d"]) - distance)
+		if dy < -90.0 or dy > _view_h + 90.0:
 			continue
 		var pos := Vector2(_sx(float(deco["x"])), dy)
 		var variant := int(deco["variant"])
@@ -2267,10 +2402,10 @@ func _draw_parallax() -> void:
 	var gx := floorf((camera_x - SCREEN_W) / GRID) * GRID
 	while gx < camera_x + SCREEN_W:
 		var x := _sx(gx)
-		draw_line(Vector2(x, 0), Vector2(x, SCREEN_H), gcol, 1.0)
+		draw_line(Vector2(x, 0), Vector2(x, _view_h), gcol, 1.0)
 		gx += GRID
-	var gd := floorf((distance + CAR_Y - SCREEN_H) / GRID) * GRID
-	while gd < distance + CAR_Y:
-		var yy := CAR_Y + distance - gd
+	var gd := floorf((distance + _car_y - _view_h) / GRID) * GRID
+	while gd < distance + _car_y:
+		var yy := _car_y + distance - gd
 		draw_line(Vector2(0, yy), Vector2(SCREEN_W, yy), gcol, 1.0)
 		gd += GRID
