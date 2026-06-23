@@ -27,16 +27,10 @@ const COL_HALF_H := 36.0
 const ROAD_CENTER_X := 360.0
 
 # ---------------- retro / pixel-art look ----------------
-# Screen-space pixel size for the 16-bit styling (chunky edges, blocky particles).
-const PIX := 5.0
-const EDGE_W := 6.0               # painted road-edge thickness
-# Road edges crumble INWARD by a small, deterministic amount so the boundary reads
-# as rough 16-bit asphalt instead of a clean vector cutout. Inward-only keeps it
-# fair: the live edge is at most this far INSIDE the true collision boundary, so the
-# car is always given (never robbed of) road versus what it looks like.
-const EDGE_ROUGH := 8.0           # max inward crumble (world px)
-const EDGE_CELL := 13.0           # world-distance one crumble "tooth" spans (chunky, not noisy)
-const EDGE_NOISE_SCALE := 0.085
+# VFX pixel grid. Matched to the car art's native resolution (25x45 source px shown
+# at 50x90 => ~2px per art-pixel), so blocky effects read at the same scale as the
+# car instead of as coarse chunks. Road EDGES are drawn smooth (see _draw_road).
+const PIX := 2.0
 
 # ---------------- camera ----------------
 const CAM_FOLLOW := 6.0
@@ -46,9 +40,9 @@ const CAM_LOOK_W := 0.30
 const GRID := 110.0               # parallax ground grid spacing
 
 # ---------------- difficulty ----------------
-const BASE_SPEED := 290.0
-const SPEED_PER_SEC := 1.8        # climbs to MAX over ~2 min, so acceleration is actually felt
-const MAX_SPEED := 520.0
+const BASE_SPEED := 330.0
+const SPEED_PER_SEC := 2.6        # climbs to MAX sooner, so the run gets exciting faster
+const MAX_SPEED := 560.0
 const START_HALF_WIDTH := 200.0
 const MIN_HALF_WIDTH := 120.0
 const NARROW_PER_DIST := 0.0007   # road narrows by distance (visible ahead, fair)
@@ -233,7 +227,7 @@ const GAUGE_R := 84.0
 const GAUGE_START_DEG := 140.0
 const GAUGE_END_DEG := 400.0
 const GAUGE_MIN_KMH := 90.0       # dial floor (just below start speed) so the needle has room to climb
-const GAUGE_MAX_KMH := 340.0      # ~MAX_SPEED * BOOST_MULT converted to km/h
+const GAUGE_MAX_KMH := 370.0      # ~MAX_SPEED * BOOST_MULT converted to km/h
 const COL_GAUGE_BG := Color(0, 0, 0, 0.35)
 const COL_GAUGE_RING := Color(1, 1, 1, 0.25)
 const COL_GAUGE_TICK := Color(1, 1, 1, 0.4)
@@ -336,6 +330,7 @@ var col_car: Color
 var col_car_dark: Color
 var col_deco: Color                # tint for primitive background props
 var _theme_stripes := true         # does the current theme paint a centre line?
+var _theme_rainbow := false        # Rainbow Lane paints the road surface itself as a rainbow
 
 # Convention-loaded theme art (null = use the primitive fallback). Mirrors audio.
 var _tex_road: Texture2D
@@ -525,7 +520,9 @@ func _apply_theme(id: String) -> void:
 	col_dash = Color(t["dash"])
 	col_car = Color(t["car"])
 	col_car_dark = Color(t["car_dark"])
-	_theme_stripes = bool(t.get("stripes", true))
+	_theme_rainbow = id == "rainbow"
+	# Rainbow Lane is the road itself (a rainbow surface), so it paints no centre line
+	_theme_stripes = bool(t.get("stripes", true)) and not _theme_rainbow
 	# primitive prop tint: keep it readable whatever the ground colour is
 	if col_offroad.get_luminance() < 0.4:
 		col_deco = col_offroad.lightened(0.32)
@@ -638,8 +635,10 @@ func _enemy_half(idx: int) -> Vector2:
 	return _enemy_col[idx % _enemy_col.size()]
 
 
-# Convention-loaded UI font (DotGothic16 if present), rendered crisp/aliased for the
-# retro look. load_dynamic_font means it works at runtime with no editor import.
+# Convention-loaded UI font (DotGothic16 if present). load_dynamic_font means it
+# works at runtime with no editor import. Antialiasing is left ON (grayscale): with
+# it off, this pixel font's glyphs snap unevenly at non-native sizes and the text
+# looks lumpy/inconsistent — AA keeps letter sizing and spacing uniform.
 func _load_ui_font() -> Font:
 	for nm in FONT_NAMES:
 		for ext in FONT_EXTS:
@@ -647,9 +646,8 @@ func _load_ui_font() -> Font:
 			if FileAccess.file_exists(p):
 				var f := FontFile.new()
 				if f.load_dynamic_font(p) == OK:
-					f.antialiasing = TextServer.FONT_ANTIALIASING_NONE
+					f.antialiasing = TextServer.FONT_ANTIALIASING_GRAY
 					f.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_DISABLED
-					f.hinting = TextServer.HINTING_NONE
 					return f
 	return ThemeDB.fallback_font
 
@@ -885,14 +883,13 @@ func _start_run() -> void:
 	_engine_low.stop()
 	_engine_high.stop()
 	_ensure_track(distance + _gen_ahead)
-	_seed_tutorial()
 	_ensure_branches(distance + _gen_ahead)
 	_ensure_hazards(distance + _gen_ahead)
 	_ensure_coins(distance + _gen_ahead)
 	_ensure_decos(distance + _gen_ahead)
 	_hud_score.text = "0"
 	_hud_coins.text = "Coins: 0"
-	_hud_prompt.visible = true
+	_hud_prompt.visible = false   # the start prompt is painted on the road (see _draw_track_hints)
 	_show_screen()
 
 
@@ -923,7 +920,7 @@ func _crash() -> void:
 	state = State.CRASH
 	_crash_timer = CRASH_TIME
 	Input.vibrate_handheld(220)
-	_spawn_explosion(_sx(car_x), _car_y)
+	_spawn_explosion(car_x, distance)   # world-anchored: plays where the car hit
 	_engine_low.stop()
 	_engine_high.stop()
 	_play_sfx(_sfx_crash)
@@ -1388,10 +1385,10 @@ func _spawn_jump_gap(d: float) -> float:
 func _smash_hazard(h: Dictionary) -> void:
 	h["dead"] = true
 	session_coins += RAM_COINS
-	var sxp := _sx(float(h["x"]))
-	var syp := _car_y - (float(h["d"]) - distance)
-	_spawn_explosion(sxp, syp)
-	_add_popup(sxp, syp - 24.0, "SMASH! +%d" % RAM_COINS, true, 240.0, true)
+	# explosion is anchored to the WORLD point it happened at, so it stays on the
+	# road as the camera scrolls past instead of sliding across the screen
+	_spawn_explosion(float(h["x"]), float(h["d"]))
+	_add_popup(_sx(float(h["x"])), _car_y - (float(h["d"]) - distance) - 24.0, "SMASH! +%d" % RAM_COINS, true, 240.0, true)
 	Input.vibrate_handheld(40)
 	_play_sfx(_sfx_smash)
 
@@ -1403,8 +1400,10 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 			continue
 		var htype: String = h["type"]
 		if htype == "traffic":
-			# closing speed scales with the player's speed (enemies get faster too)
-			h["d"] = float(h["d"]) - current_speed() * float(h["spd"]) * delta
+			# Each car has its own (varied) closing speed that scales only with the
+			# difficulty ramp, NOT with the player's boost — so boosting never drags
+			# the traffic along with you.
+			h["d"] = float(h["d"]) - _ramp_speed() * float(h["spd"]) * delta
 			var td := float(h["d"])
 			var oldx := float(h["x"])
 			var nx: float
@@ -1487,13 +1486,26 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 # ============================================================
 #  PARTICLES / TIRE MARKS / EXPLOSION
 # ============================================================
+# Particles/explosions are anchored to a WORLD point ("wx" world-x, "wd" distance)
+# plus a screen-space spread "off" that grows from their velocity — so they stay
+# put on the road as the world scrolls (an explosion plays where the crash happened)
+# instead of sliding across the screen with the camera. _boom_screen() resolves the
+# anchor to the current screen position.
+func _boom_screen(e: Dictionary) -> Vector2:
+	var base := Vector2(_sx(float(e["wx"])), _car_y - (float(e["wd"]) - distance))
+	return base + Vector2(e["off"])
+
+
 func _emit_exhaust(delta: float) -> void:
 	_exhaust_accum += delta
 	while _exhaust_accum > 0.04:
 		_exhaust_accum -= 0.04
-		var rear := Vector2(_sx(car_x) + randf_range(-6.0, 6.0), _car_y + CAR_HALF_H * 0.7)
 		var vel := Vector2(randf_range(-14.0, 14.0), randf_range(36.0, 70.0))
-		_particles.append({ "pos": rear, "vel": vel, "age": 0.0, "life": randf_range(0.4, 0.7), "r": randf_range(3.0, 6.0) })
+		_particles.append({
+			"wx": car_x + randf_range(-6.0, 6.0), "wd": distance - CAR_HALF_H * 0.7,
+			"off": Vector2.ZERO, "vel": vel,
+			"age": 0.0, "life": randf_range(0.4, 0.7), "r": randf_range(3.0, 6.0),
+		})
 
 
 func _update_particles(delta: float) -> void:
@@ -1504,20 +1516,19 @@ func _update_particles(delta: float) -> void:
 		if float(p["age"]) >= float(p["life"]):
 			_particles.remove_at(i)
 		else:
-			var pos: Vector2 = p["pos"]
 			var vel: Vector2 = p["vel"]
-			p["pos"] = pos + vel * delta
+			p["off"] = Vector2(p["off"]) + vel * delta
 			p["vel"] = vel * (1.0 - 1.4 * delta)
 		i -= 1
 
 
-func _spawn_explosion(sx_pos: float, sy_pos: float) -> void:
+func _spawn_explosion(wx: float, wd: float) -> void:
 	var cols := [Color("ffd54a"), Color("ff8c1a"), Color("e74c3c"), Color("ffffff")]
 	for n in range(34):
 		var a := randf() * TAU
 		var sp := randf_range(70.0, 340.0)
 		_boom.append({
-			"pos": Vector2(sx_pos, sy_pos),
+			"wx": wx, "wd": wd, "off": Vector2.ZERO,
 			"vel": Vector2(cos(a), sin(a)) * sp,
 			"age": 0.0, "life": randf_range(0.4, 0.95),
 			"r": randf_range(4.0, 11.0),
@@ -1533,9 +1544,8 @@ func _update_boom(delta: float) -> void:
 		if float(b["age"]) >= float(b["life"]):
 			_boom.remove_at(i)
 		else:
-			var pos: Vector2 = b["pos"]
 			var vel: Vector2 = b["vel"]
-			b["pos"] = pos + vel * delta
+			b["off"] = Vector2(b["off"]) + vel * delta
 			b["vel"] = vel * (1.0 - 2.2 * delta)
 		i -= 1
 
@@ -2028,7 +2038,7 @@ func _ensure_coins(up_to: float) -> void:
 	while _coin_frontier_d < up_to:
 		_coin_frontier_d += COIN_SPACING * randf_range(0.8, 1.4)
 		if _coin_frontier_d < INTRO_DIST:
-			continue   # the intro is left to the deliberate teaching chain (_seed_tutorial)
+			continue   # no coins in the opening stretch (avoids restart-farming)
 		var d := _coin_frontier_d
 		if _in_branch(d):
 			continue   # branches seed their own coins along the scenic lane
@@ -2073,27 +2083,6 @@ func _coin_blocked(d: float, x: float) -> bool:
 		if absf(float(h["d"]) - d) < half_h + COIN_R and absf(float(h["x"]) - x) < half_w + COIN_R:
 			return true
 	return false
-
-
-# An on-ramp coin chain inside the (hazard-free) intro that TEACHES the control
-# scheme by action rather than text: it curves LEFT first — only reachable by
-# HOLDING — then swings RIGHT, only reachable by RELEASING. By the time the player
-# has swept up the chain they've felt hold = left / release = right, and the first
-# fork is only a moment further on. Kept entirely within INTRO_DIST so it stays a
-# clean, hazard-free teaching run.
-func _seed_tutorial() -> void:
-	var cx := ROAD_CENTER_X
-	var chain := [
-		Vector2(300.0, cx),
-		Vector2(370.0, cx - 32.0),
-		Vector2(440.0, cx - 62.0),
-		Vector2(510.0, cx - 60.0),
-		Vector2(580.0, cx - 18.0),
-		Vector2(650.0, cx + 34.0),
-		Vector2(720.0, cx + 62.0),
-	]
-	for p in chain:
-		_coins.append({ "d": p.x, "x": p.y, "got": false, "missed": false, "tutorial": true })
 
 
 # ============================================================
@@ -2151,8 +2140,6 @@ func _car_angle() -> float:
 	return clampf(lateral_velocity / STEER_SPEED, -1.0, 1.0) * MAX_TILT
 
 
-# ---- retro pixel helpers (chunky look without touching gameplay maths) ----
-
 # A filled square snapped to the PIX grid — the building block for the blocky VFX.
 func _draw_pix_square(center: Vector2, half: float, col: Color) -> void:
 	var s := maxf(PIX, roundf(half * 2.0 / PIX) * PIX)
@@ -2161,58 +2148,37 @@ func _draw_pix_square(center: Vector2, half: float, col: Color) -> void:
 	draw_rect(Rect2(x, y, s, s), col)
 
 
-# Deterministic, world-stable inward crumble (>= 0 world px) for a road edge, held
-# constant across each EDGE_CELL so it reads as chunky 16-bit teeth rather than fine
-# noise. Keyed on a per-edge seed so the four fork boundaries crumble differently.
-func _edge_crumble(d: float, seed: float) -> float:
-	var dc := floorf(d / EDGE_CELL) * EDGE_CELL
-	var raw := absf(_micro_noise.get_noise_2d(dc * EDGE_NOISE_SCALE, seed))
-	return roundf(raw * EDGE_ROUGH / PIX) * PIX
-
-
-# Crumbled WORLD x of a road edge. side = -1 for a left edge (eats rightward, into
-# the road), +1 for a right edge (eats leftward) — always inward, so the visible
-# road is a touch tighter than the true collision boundary and never wider (fair).
-func _edge_x(c: float, hw: float, side: float, d: float, seed: float) -> float:
-	return c + side * hw - side * _edge_crumble(d, seed)
-
-
-# Draws a road edge as a column of chunky pixel blocks following the (already
-# crumbled) polyline, bridging horizontal steps so the jagged edge stays connected.
-func _draw_pixel_edge(pts: PackedVector2Array, col: Color, thick: float) -> void:
-	var n := pts.size()
-	if n < 2:
-		return
-	var stepi := maxi(1, int(round(PIX / 3.0)))   # pts are sampled ~3px apart in y
-	var prev_x := INF
-	var i := 0
-	while i < n:
-		var p := pts[i]
-		var qx := roundf(p.x / PIX) * PIX
-		var qy := roundf(p.y / PIX) * PIX
-		draw_rect(Rect2(qx - thick * 0.5, qy, thick, PIX + 1.0), col)
-		if prev_x != INF and absf(qx - prev_x) > PIX * 0.5:
-			var a := minf(qx, prev_x)
-			var b := maxf(qx, prev_x)
-			draw_rect(Rect2(a - thick * 0.5, qy, (b - a) + thick, thick), col)
-		prev_x = qx
-		i += stepi
-
-
-# On-road control coaching for the opening stretch: a left arrow ("HOLD = LEFT")
-# and a right arrow ("RELEASE = RIGHT") painted on the asphalt, with the side that
-# matches the live input lit up — so the scheme is taught through the track itself,
-# alongside the teaching coin chain, not via HUD text alone. Fades out as the intro
-# ends so it never clutters real play.
+# Opening-stretch coaching painted on the road itself (the first stretch carries no
+# centre line, so it stays clear): the start prompt up front, then a left arrow
+# ("HOLD = LEFT") and a right arrow ("RELEASE = RIGHT") with the side matching the
+# live input lit up. Teaches the scheme through the track, not just HUD text, and
+# fades out as the intro ends so it never clutters real play.
 func _draw_track_hints() -> void:
 	if not (state == State.PLAYING or state == State.COUNTDOWN):
 		return
-	var fade := clampf((INTRO_DIST + 140.0 - distance) / 360.0, 0.0, 1.0)
+	var fade := clampf((INTRO_DIST + 120.0 - distance) / 320.0, 0.0, 1.0)
 	if fade <= 0.0:
 		return
+	if not _run_started:
+		_draw_road_text(235.0, "TAP TO BEGIN", 48, Color(1, 1, 1, fade))
+		_draw_road_text(175.0, "hold to steer", 26, Color(1, 1, 1, fade * 0.8))
 	var holding := _input_down()
-	_draw_hint_arrow(360.0, -1.0, "HOLD", "= LEFT", holding, fade)
-	_draw_hint_arrow(560.0, 1.0, "RELEASE", "= RIGHT", not holding, fade)
+	_draw_hint_arrow(400.0, -1.0, "HOLD", "= LEFT", holding, fade)
+	_draw_hint_arrow(620.0, 1.0, "RELEASE", "= RIGHT", not holding, fade)
+
+
+# Centred text drawn on the road surface at world-distance d, with a dark drop
+# shadow so it stays legible over any theme's asphalt.
+func _draw_road_text(d: float, text: String, size: int, col: Color) -> void:
+	if _ui_font == null:
+		return
+	var y := _car_y - (d - distance)
+	if y < -40.0 or y > _view_h + 40.0:
+		return
+	var cx := _sx(road_center(d))
+	var w := 520.0
+	draw_string(_ui_font, Vector2(cx - w * 0.5 + 2.0, y + 2.0), text, HORIZONTAL_ALIGNMENT_CENTER, w, size, Color(0, 0, 0, col.a * 0.6))
+	draw_string(_ui_font, Vector2(cx - w * 0.5, y), text, HORIZONTAL_ALIGNMENT_CENTER, w, size, col)
 
 
 func _draw_hint_arrow(d: float, dir: float, word: String, sub: String, active: bool, fade: float) -> void:
@@ -2368,9 +2334,8 @@ func _draw() -> void:
 		var cy := _car_y - (float(coin["d"]) - distance)
 		if cy > -COIN_R and cy < _view_h + COIN_R:
 			var cx := _sx(float(coin["x"]))
-			# blocky 16-bit coin: gold square with a lighter inner pip
-			_draw_pix_square(Vector2(cx, cy), COIN_R * 0.9, COL_COIN)
-			_draw_pix_square(Vector2(cx, cy), COIN_R * 0.45, COL_COIN_HI)
+			draw_circle(Vector2(cx, cy), COIN_R, COL_COIN)
+			draw_circle(Vector2(cx, cy), COIN_R * 0.55, COL_COIN_HI)
 
 	for pp in _particles:
 		var life := float(pp["life"])
@@ -2378,8 +2343,7 @@ func _draw() -> void:
 		if rem > 0.0:
 			var ec := COL_EXHAUST
 			ec.a = rem * 0.35
-			var ppos: Vector2 = pp["pos"]
-			_draw_pix_square(ppos, float(pp["r"]) * (0.6 + rem * 0.6), ec)
+			_draw_pix_square(_boom_screen(pp), float(pp["r"]) * (0.6 + rem * 0.6), ec)
 
 	# car (hidden once it has exploded; shown frozen during the resume countdown)
 	if state == State.PLAYING or state == State.COUNTDOWN:
@@ -2408,14 +2372,13 @@ func _draw() -> void:
 			draw_rect(Rect2(-CAR_HALF_W + 8.0, -CAR_HALF_H + 18.0, CAR_W - 16.0, 30.0), col_car_dark)
 		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
-	# explosion — chunky pixel debris to match the 16-bit VFX
+	# explosion — pixel debris (world-anchored, so it stays where the crash happened)
 	for b in _boom:
 		var brem := 1.0 - float(b["age"]) / float(b["life"])
 		if brem > 0.0:
 			var bcol: Color = b["col"]
 			bcol.a = brem
-			var bpos: Vector2 = b["pos"]
-			_draw_pix_square(bpos, float(b["r"]) * (0.5 + brem * 0.8), bcol)
+			_draw_pix_square(_boom_screen(b), float(b["r"]) * (0.5 + brem * 0.8), bcol)
 
 	if state == State.PLAYING or state == State.COUNTDOWN or state == State.CRASH:
 		_draw_speedometer()
@@ -2518,16 +2481,14 @@ func _draw_road() -> void:
 			var d := distance_at_row(y)
 			var c := road_center(d)
 			var hw := road_half_width(d)
-			# edges crumble inward (deterministically) so they read as rough 16-bit
-			# asphalt instead of a clean vector cutout; fill + stroke share the points
-			left.append(Vector2(_sx(_edge_x(c, hw, -1.0, d, 1.0)), y))
-			right.append(Vector2(_sx(_edge_x(c, hw, 1.0, d, 4.0)), y))
+			left.append(Vector2(_sx(c - hw), y))
+			right.append(Vector2(_sx(c + hw), y))
 			vs.append(d / ROAD_TEX_TILE)
 			centers.append(Vector3(_sx(c), y, d))
 			y += step
 		_fill_band(left, right, vs)
-		_draw_pixel_edge(left, col_edge, EDGE_W)
-		_draw_pixel_edge(right, col_edge, EDGE_W)
+		draw_polyline(left, col_edge, 5.0, true)
+		draw_polyline(right, col_edge, 5.0, true)
 		_draw_dashes(centers)
 		return
 
@@ -2551,12 +2512,10 @@ func _draw_road() -> void:
 		var hw0 := float(lanes[0]["hw"])
 		var c1 := float(lanes[1]["c"])
 		var hw1 := float(lanes[1]["hw"])
-		# each of the four boundaries crumbles inward with its own seed (so they don't
-		# look like mirror copies); fill and edge stroke share the crumbled points
-		l0.append(Vector2(_sx(_edge_x(c0, hw0, -1.0, d, 1.0)), yy))
-		r0.append(Vector2(_sx(_edge_x(c0, hw0, 1.0, d, 2.0)), yy))
-		l1.append(Vector2(_sx(_edge_x(c1, hw1, -1.0, d, 3.0)), yy))
-		r1.append(Vector2(_sx(_edge_x(c1, hw1, 1.0, d, 4.0)), yy))
+		l0.append(Vector2(_sx(c0 - hw0), yy))
+		r0.append(Vector2(_sx(c0 + hw0), yy))
+		l1.append(Vector2(_sx(c1 - hw1), yy))
+		r1.append(Vector2(_sx(c1 + hw1), yy))
 		cen0.append(Vector3(_sx(c0), yy, d))
 		cen1.append(Vector3(_sx(c1), yy, d))
 		vs.append(d / ROAD_TEX_TILE)
@@ -2564,9 +2523,9 @@ func _draw_road() -> void:
 		yy += step
 	_fill_band(l0, r0, vs)
 	_fill_band(l1, r1, vs)
-	_draw_pixel_edge(l0, col_edge, EDGE_W)    # outer-left  (always a boundary)
-	_draw_pixel_edge(r1, col_edge, EDGE_W)    # outer-right (always a boundary)
-	_draw_open_edge(r0, open)                 # inner edges (median kerb) only where open
+	draw_polyline(l0, col_edge, 5.0, true)   # outer-left  (always a boundary)
+	draw_polyline(r1, col_edge, 5.0, true)   # outer-right (always a boundary)
+	_draw_open_edge(r0, open)                # inner edges (median kerb) only where open
 	_draw_open_edge(l1, open)
 	_draw_median(r0, l1, open)                # painted nose caps at the gore tips
 	_draw_dashes(cen0)
@@ -2576,19 +2535,48 @@ func _draw_road() -> void:
 # Fills a road band, textured (tiling along its length via the vs/UV-v values when
 # a road texture is loaded) or flat-coloured otherwise.
 func _fill_band(left: PackedVector2Array, right: PackedVector2Array, vs := PackedFloat32Array()) -> void:
-	var poly := PackedVector2Array()
-	poly.append_array(left)
-	for i in range(right.size() - 1, -1, -1):
-		poly.append(right[i])
 	if _tex_road != null and vs.size() == left.size() and left.size() == right.size():
+		var poly := PackedVector2Array()
+		poly.append_array(left)
+		for i in range(right.size() - 1, -1, -1):
+			poly.append(right[i])
 		var uvs := PackedVector2Array()
 		for i in range(left.size()):
 			uvs.append(Vector2(0.0, vs[i]))
 		for i in range(right.size() - 1, -1, -1):
 			uvs.append(Vector2(1.0, vs[i]))
 		draw_colored_polygon(poly, Color.WHITE, uvs, _tex_road)
-	else:
-		draw_colored_polygon(poly, col_road)
+		return
+	if _theme_rainbow:
+		_fill_rainbow(left, right)
+		return
+	var flat := PackedVector2Array()
+	flat.append_array(left)
+	for i in range(right.size() - 1, -1, -1):
+		flat.append(right[i])
+	draw_colored_polygon(flat, col_road)
+
+
+# Rainbow Lane surface: longitudinal ROYGBIV stripes running down the road (à la
+# Mario Kart's Rainbow Road), built as parallel sub-bands across the width so they
+# follow the road through every bend. A slow hue scroll keyed to world-distance
+# makes the colours shimmer toward the player.
+func _fill_rainbow(left: PackedVector2Array, right: PackedVector2Array) -> void:
+	var n := left.size()
+	if n < 2 or right.size() != n:
+		return
+	var bands := 7
+	var shift := distance * 0.0012
+	for k in range(bands):
+		var f0 := float(k) / float(bands)
+		var f1 := float(k + 1) / float(bands)
+		var poly := PackedVector2Array()
+		for i in range(n):
+			poly.append(left[i].lerp(right[i], f0))
+		for i in range(n - 1, -1, -1):
+			poly.append(left[i].lerp(right[i], f1))
+		var hue := fposmod(f0 + shift, 1.0)
+		draw_colored_polygon(poly, Color.from_hsv(hue, 0.85, 1.0))
 
 
 # Centre line. Off-road / track themes paint none. Each dash is drawn as ONE
@@ -2600,7 +2588,8 @@ func _draw_dashes(centers: Array) -> void:
 	var seg := PackedVector2Array()
 	for i in range(centers.size()):
 		var p: Vector3 = centers[i]
-		if fposmod(p.z, DASH_PERIOD) < DASH_PERIOD * 0.5:
+		# leave the opening stretch unmarked so the on-road control prompts read clean
+		if p.z >= INTRO_DIST and fposmod(p.z, DASH_PERIOD) < DASH_PERIOD * 0.5:
 			seg.append(Vector2(p.x, p.y))
 		else:
 			if seg.size() >= 2:
@@ -2621,10 +2610,10 @@ func _draw_open_edge(pts: PackedVector2Array, open: PackedInt32Array) -> void:
 			seg.append(pts[i])
 		else:
 			if seg.size() >= 2:
-				_draw_pixel_edge(seg, col_edge, EDGE_W)
+				draw_polyline(seg, col_edge, 5.0, true)
 			seg = PackedVector2Array()
 	if seg.size() >= 2:
-		_draw_pixel_edge(seg, col_edge, EDGE_W)
+		draw_polyline(seg, col_edge, 5.0, true)
 
 
 # Marks the grass median where the road forks with a small painted nose cap at
