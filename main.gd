@@ -83,6 +83,7 @@ const MAX_TILT := 0.45
 # ---------------- road shape ----------------
 const MICRO_AMP := 0.0            # 0 = perfectly smooth edges
 const DASH_PERIOD := 90.0
+const DASH_SPLIT_EPS := 2.0       # lane centres must part by this (px) before the 2nd centre line is painted — below it the two lanes coincide and a single line is drawn (no double-paint flicker)
 
 # ---------------- forks ----------------
 # road_center/road_half_width describe ONE continuous centerline. A "fork"
@@ -2492,10 +2493,11 @@ func _draw_road() -> void:
 		_draw_dashes(centers)
 		return
 
-	# branch path: two lane bands. The gap between them is left unpainted so the
-	# off-road shows through as the median. Only the OUTER edges are drawn
-	# continuously; the inner (median) edges are drawn only where the lanes have
-	# actually separated — that's what stops the edges intertwining at merges.
+	# branch path: two lane bands around an (optional) grass median. The gap between
+	# them is left unpainted so the off-road shows through. Outer edges are drawn
+	# continuously; the inner (median) edges are stroked as a single outline that
+	# tapers to a point at each gore tip, so a fork opens and closes like a real
+	# road split rather than popping a kerb + nose-dot in and out at a hard cutoff.
 	var l0 := PackedVector2Array()
 	var r0 := PackedVector2Array()
 	var l1 := PackedVector2Array()
@@ -2503,7 +2505,7 @@ func _draw_road() -> void:
 	var cen0: Array = []
 	var cen1: Array = []
 	var vs := PackedFloat32Array()
-	var open := PackedInt32Array()
+	var split := PackedInt32Array()   # 1 where the two lane centres have parted — see DASH_SPLIT_EPS
 	var yy := 0.0
 	while yy <= _view_h:
 		var d := distance_at_row(yy)
@@ -2518,18 +2520,16 @@ func _draw_road() -> void:
 		r1.append(Vector2(_sx(c1 + hw1), yy))
 		cen0.append(Vector3(_sx(c0), yy, d))
 		cen1.append(Vector3(_sx(c1), yy, d))
+		split.append(1 if absf(c1 - c0) > DASH_SPLIT_EPS else 0)
 		vs.append(d / ROAD_TEX_TILE)
-		open.append(1 if (c1 - hw1) > (c0 + hw0) + 4.0 else 0)
 		yy += step
 	_fill_band(l0, r0, vs)
 	_fill_band(l1, r1, vs)
 	draw_polyline(l0, col_edge, 5.0, true)   # outer-left  (always a boundary)
 	draw_polyline(r1, col_edge, 5.0, true)   # outer-right (always a boundary)
-	_draw_open_edge(r0, open)                # inner edges (median kerb) only where open
-	_draw_open_edge(l1, open)
-	_draw_median(r0, l1, open)                # painted nose caps at the gore tips
-	_draw_dashes(cen0)
-	_draw_dashes(cen1)
+	_draw_gore(r0, l1)                        # median kerb, tapered to a point at each tip
+	_draw_dashes(cen0)                        # through / left-lane centre line (always present)
+	_draw_dashes(cen1, split)                 # right-lane centre line, only where it has parted
 
 
 # Fills a road band, textured (tiling along its length via the vs/UV-v values when
@@ -2582,14 +2582,21 @@ func _fill_rainbow(left: PackedVector2Array, right: PackedVector2Array) -> void:
 # Centre line. Off-road / track themes paint none. Each dash is drawn as ONE
 # grouped polyline over its "on" run instead of a stack of tiny per-sample lines —
 # that overlap of antialiased stubs was what made the old stripes blotchy on bends.
-func _draw_dashes(centers: Array) -> void:
+# An optional mask suppresses samples (used so a fork's second lane line is painted
+# only where that lane has actually parted from the first — where they coincide a
+# single line is drawn, instead of two overlapping ones that flickered bolder).
+func _draw_dashes(centers: Array, mask := PackedInt32Array()) -> void:
 	if not _theme_stripes:
 		return
+	var use_mask := mask.size() == centers.size()
 	var seg := PackedVector2Array()
 	for i in range(centers.size()):
 		var p: Vector3 = centers[i]
 		# leave the opening stretch unmarked so the on-road control prompts read clean
-		if p.z >= INTRO_DIST and fposmod(p.z, DASH_PERIOD) < DASH_PERIOD * 0.5:
+		var on := p.z >= INTRO_DIST and fposmod(p.z, DASH_PERIOD) < DASH_PERIOD * 0.5
+		if use_mask and mask[i] == 0:
+			on = false
+		if on:
 			seg.append(Vector2(p.x, p.y))
 		else:
 			if seg.size() >= 2:
@@ -2599,39 +2606,50 @@ func _draw_dashes(centers: Array) -> void:
 		draw_polyline(seg, col_dash, 5.0, true)
 
 
-# Draws an inner (median) edge only across rows where the median is open,
-# splitting into separate strokes so unrelated open regions (e.g. two branches
-# on screen at once) are never joined by a stray line — which is what produced
-# the intertwining edges before.
-func _draw_open_edge(pts: PackedVector2Array, open: PackedInt32Array) -> void:
-	var seg := PackedVector2Array()
-	for i in range(pts.size()):
-		if open[i] == 1:
-			seg.append(pts[i])
-		else:
-			if seg.size() >= 2:
-				draw_polyline(seg, col_edge, 5.0, true)
-			seg = PackedVector2Array()
-	if seg.size() >= 2:
-		draw_polyline(seg, col_edge, 5.0, true)
-
-
-# Marks the grass median where the road forks with a small painted nose cap at
-# each tip of an open run, so the split reads as an intentional road feature. (The
-# old hazard chevrons down the gore read as obstacles and were removed.)
-func _draw_median(r0: PackedVector2Array, l1: PackedVector2Array, open: PackedInt32Array) -> void:
-	var n := open.size()
+# Median kerb around a fork's grass gore. The gore is where the right lane's inner
+# edge (l1) sits to the RIGHT of the left lane's inner edge (r0), so real off-road
+# shows between them. Each contiguous open run is stroked as ONE closed outline
+# whose two ends taper to the exact point where the inner edges cross (median width
+# 0), so the split opens and closes to a clean nose instead of popping a kerb and a
+# nose-dot in and out at a hard threshold. Runs are kept separate, so unrelated
+# open regions (two branches on screen at once) are never joined by a stray line.
+func _draw_gore(r0: PackedVector2Array, l1: PackedVector2Array) -> void:
+	var n := r0.size()
+	if n == 0 or l1.size() != n:
+		return
 	var i := 0
 	while i < n:
-		if open[i] == 0:
+		if l1[i].x - r0[i].x <= 0.0:
 			i += 1
 			continue
 		var j := i
-		while j < n and open[j] == 1:
+		while j < n and (l1[j].x - r0[j].x) > 0.0:
 			j += 1
-		draw_circle((r0[i] + l1[i]) * 0.5, 6.0, col_edge)
-		draw_circle((r0[j - 1] + l1[j - 1]) * 0.5, 6.0, col_edge)
+		# tips: where the inner edges meet (zero median width), interpolated against
+		# the bracketing closed sample so the nose is sharp rather than step-quantised
+		var head := _gore_tip(r0, l1, i, -1) if i > 0 else (r0[0] + l1[0]) * 0.5
+		var tail := _gore_tip(r0, l1, j - 1, 1) if j < n else (r0[n - 1] + l1[n - 1]) * 0.5
+		var loop := PackedVector2Array()
+		loop.append(head)
+		for k in range(i, j):
+			loop.append(r0[k])
+		loop.append(tail)
+		for k in range(j - 1, i - 1, -1):
+			loop.append(l1[k])
+		loop.append(head)
+		draw_polyline(loop, col_edge, 5.0, true)
 		i = j
+
+
+# Point where the median's two inner edges cross (width 0), found by interpolating
+# between an open sample (idx) and its closed neighbour (idx + dir) — the gore tip.
+func _gore_tip(r0: PackedVector2Array, l1: PackedVector2Array, idx: int, dir: int) -> Vector2:
+	var nb := idx + dir
+	var m_open := l1[idx].x - r0[idx].x       # > 0
+	var m_closed := l1[nb].x - r0[nb].x        # <= 0
+	var denom := m_open - m_closed
+	var s := 0.0 if denom == 0.0 else clampf(-m_closed / denom, 0.0, 1.0)
+	return (r0[nb].lerp(r0[idx], s) + l1[nb].lerp(l1[idx], s)) * 0.5
 
 
 # Off-road background: a per-theme texture tiled with parallax scroll, or the flat
