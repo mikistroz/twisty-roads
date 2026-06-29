@@ -217,6 +217,25 @@ const COL_EXHAUST := Color(0.72, 0.72, 0.78)
 const COL_GAP := Color("070708")          # the hole itself (reads as a void in the road)
 const COL_GAP_RIM := Color("f4c20d")      # hazard-striped lip on the near edge
 
+# ---------------- trail VFX ----------------
+# What the car kicks up, keyed by each theme's "vfx" name. "streak" themes lay two
+# bright tail-light ribbons from the rear corners (synthwave/jdm/wiped/rainbow); the
+# rest spray themed puffs (dust, smoke, gravel, sand, mud, water, snow). A particle
+# colour is picked per emit from "cols" (empty cols => rainbow hue cycle).
+const VFX := {
+	"dust":      { "cols": ["b8b0a0", "9c9488", "cfc7b8"], "streak": false, "rmin": 3.0, "rmax": 6.0, "lmin": 0.40, "lmax": 0.70 },
+	"smoke":     { "cols": ["8a8a8a", "b0b0b0", "6e6e6e"], "streak": false, "rmin": 4.0, "rmax": 8.0, "lmin": 0.50, "lmax": 0.95 },
+	"gravel":    { "cols": ["7a5a36", "9c7a48", "5b432a"], "streak": false, "rmin": 2.0, "rmax": 4.5, "lmin": 0.30, "lmax": 0.55 },
+	"sand":      { "cols": ["d8c088", "c2954e", "e8d6a0"], "streak": false, "rmin": 3.0, "rmax": 6.0, "lmin": 0.40, "lmax": 0.70 },
+	"mud":       { "cols": ["4a3520", "5b432a", "33240f"], "streak": false, "rmin": 3.0, "rmax": 6.0, "lmin": 0.40, "lmax": 0.70 },
+	"splash":    { "cols": ["9be7ff", "ffffff", "5fc8e8"], "streak": false, "rmin": 3.0, "rmax": 6.0, "lmin": 0.35, "lmax": 0.60 },
+	"snow":      { "cols": ["ffffff", "dfe9f0", "cfe0ee"], "streak": false, "rmin": 3.0, "rmax": 6.0, "lmin": 0.55, "lmax": 0.95 },
+	"neon":      { "cols": ["ff2e97", "00f0ff"],           "streak": true,  "rmin": 3.0, "rmax": 5.0, "lmin": 0.35, "lmax": 0.60 },
+	"underglow": { "cols": ["f72585", "4cc9f0"],           "streak": true,  "rmin": 3.0, "rmax": 5.0, "lmin": 0.35, "lmax": 0.60 },
+	"energy":    { "cols": ["39c0ff", "8affff"],           "streak": true,  "rmin": 3.0, "rmax": 5.0, "lmin": 0.35, "lmax": 0.60 },
+	"rainbow":   { "cols": [],                             "streak": true,  "rmin": 3.0, "rmax": 5.0, "lmin": 0.40, "lmax": 0.70 },
+}
+
 # ---------------- crash ----------------
 const CRASH_TIME := 1.0
 const COL_SPEED_MAX := Color("ff5a5f")
@@ -332,6 +351,7 @@ var col_car_dark: Color
 var col_deco: Color                # tint for primitive background props
 var _theme_stripes := true         # does the current theme paint a centre line?
 var _theme_rainbow := false        # Rainbow Lane paints the road surface itself as a rainbow
+var _theme_vfx := "dust"           # which trail effect the car kicks up (see VFX / _emit_trail)
 
 # Convention-loaded theme art (null = use the primitive fallback). Mirrors audio.
 var _tex_road: Texture2D
@@ -339,6 +359,8 @@ var _tex_bg: Texture2D
 var _tex_car: Texture2D
 var _tex_enemy: Array[Texture2D] = []
 var _tex_deco: Array[Texture2D] = []
+# Built once, theme-independent: the Rainbow Lane stripe palette (see _fill_rainbow).
+var _tex_rainbow: ImageTexture
 
 # Live collision half-extents. Default to the canonical footprint; once a sprite is
 # loaded they shrink to its opaque content so collisions ignore transparent pixels
@@ -522,6 +544,7 @@ func _apply_theme(id: String) -> void:
 	col_car = Color(t["car"])
 	col_car_dark = Color(t["car_dark"])
 	_theme_rainbow = id == "rainbow"
+	_theme_vfx = String(t.get("vfx", "dust"))
 	# Rainbow Lane is the road itself (a rainbow surface), so it paints no centre line
 	_theme_stripes = bool(t.get("stripes", true)) and not _theme_rainbow
 	# primitive prop tint: keep it readable whatever the ground colour is
@@ -1139,7 +1162,7 @@ func _update_play(delta: float) -> void:
 		_tire_marks.append({ "d": distance, "x": car_x - 12.0, "age": 0.0 })
 		_tire_marks.append({ "d": distance, "x": car_x + 12.0, "age": 0.0 })
 
-	_emit_exhaust(delta)
+	_emit_trail(delta)
 	_update_particles(delta)
 	_update_boom(delta)        # smash debris from ram-throughs animates during play too
 	_update_tire_marks(delta)
@@ -1497,16 +1520,41 @@ func _boom_screen(e: Dictionary) -> Vector2:
 	return base + Vector2(e["off"])
 
 
-func _emit_exhaust(delta: float) -> void:
+# Per-theme trail behind the car. Streak themes lay two bright tail-light ribbons
+# from the rear corners; spray themes puff themed debris out behind. Shape/colour
+# come from the active theme's VFX entry (see VFX).
+func _emit_trail(delta: float) -> void:
+	var fx: Dictionary = VFX.get(_theme_vfx, VFX["dust"])
+	var streak := bool(fx["streak"])
+	var interval := 0.025 if streak else 0.04   # denser for streaks so the ribbon reads continuous
 	_exhaust_accum += delta
-	while _exhaust_accum > 0.04:
-		_exhaust_accum -= 0.04
-		var vel := Vector2(randf_range(-14.0, 14.0), randf_range(36.0, 70.0))
-		_particles.append({
-			"wx": car_x + randf_range(-6.0, 6.0), "wd": distance - CAR_HALF_H * 0.7,
-			"off": Vector2.ZERO, "vel": vel,
-			"age": 0.0, "life": randf_range(0.4, 0.7), "r": randf_range(3.0, 6.0),
-		})
+	while _exhaust_accum > interval:
+		_exhaust_accum -= interval
+		var life := randf_range(float(fx["lmin"]), float(fx["lmax"]))
+		var r := randf_range(float(fx["rmin"]), float(fx["rmax"]))
+		if streak:
+			# two ribbons straight back from the rear corners
+			for sgn in [-1.0, 1.0]:
+				_particles.append({
+					"wx": car_x + sgn * CAR_HALF_W * 0.55, "wd": distance - CAR_HALF_H * 0.85,
+					"off": Vector2.ZERO, "vel": Vector2(randf_range(-4.0, 4.0), randf_range(70.0, 110.0)),
+					"age": 0.0, "life": life, "r": r, "col": _vfx_color(fx), "streak": true,
+				})
+		else:
+			_particles.append({
+				"wx": car_x + randf_range(-6.0, 6.0), "wd": distance - CAR_HALF_H * 0.7,
+				"off": Vector2.ZERO, "vel": Vector2(randf_range(-14.0, 14.0), randf_range(36.0, 70.0)),
+				"age": 0.0, "life": life, "r": r, "col": _vfx_color(fx), "streak": false,
+			})
+
+
+# A particle colour for this VFX: random from its palette, or a cycling rainbow hue
+# when the palette is empty (Rainbow Lane).
+func _vfx_color(fx: Dictionary) -> Color:
+	var cols: Array = fx["cols"]
+	if cols.is_empty():
+		return Color.from_hsv(fposmod(time_alive * 0.6 + randf() * 0.1, 1.0), 0.9, 1.0)
+	return Color(cols[randi() % cols.size()])
 
 
 func _update_particles(delta: float) -> void:
@@ -2341,9 +2389,18 @@ func _draw() -> void:
 	for pp in _particles:
 		var life := float(pp["life"])
 		var rem := 1.0 - float(pp["age"]) / life
-		if rem > 0.0:
-			var ec := COL_EXHAUST
-			ec.a = rem * 0.35
+		if rem <= 0.0:
+			continue
+		var ec: Color = pp.get("col", COL_EXHAUST)
+		if bool(pp.get("streak", false)):
+			# tail-light ribbon: a short vertical bar that stays bright as it trails
+			ec.a = rem * 0.8
+			var c := _boom_screen(pp)
+			var w := float(pp["r"]) * 0.7
+			var h := float(pp["r"]) * (1.6 + rem * 2.4)
+			draw_rect(Rect2(c.x - w * 0.5, c.y - h * 0.5, w, h), ec)
+		else:
+			ec.a = rem * 0.42
 			_draw_pix_square(_boom_screen(pp), float(pp["r"]) * (0.6 + rem * 0.6), ec)
 
 	# car (hidden once it has exploded; shown frozen during the resume countdown)
@@ -2558,25 +2615,46 @@ func _fill_band(left: PackedVector2Array, right: PackedVector2Array, vs := Packe
 
 
 # Rainbow Lane surface: longitudinal ROYGBIV stripes running down the road (à la
-# Mario Kart's Rainbow Road), built as parallel sub-bands across the width so they
-# follow the road through every bend. A slow hue scroll keyed to world-distance
-# makes the colours shimmer toward the player.
+# Mario Kart's Rainbow Road), following the road through every bend, with a slow
+# hue scroll keyed to world-distance so the colours shimmer toward the player.
+#
+# This used to redraw SEVEN full-length concave polygons per band every frame (and
+# twice that inside a fork) — heavy: each one is hundreds of vertices the renderer
+# has to triangulate. Now the stripes live in a tiny precomputed texture (one column
+# per stripe, one row per cycle phase) and the whole surface is ONE textured polygon:
+# u runs 0->1 across the road width (nearest-sampled into 7 hard stripes) and v is
+# the current cycle phase. Same look, a single draw call.
 func _fill_rainbow(left: PackedVector2Array, right: PackedVector2Array) -> void:
 	var n := left.size()
 	if n < 2 or right.size() != n:
 		return
+	if _tex_rainbow == null:
+		_build_rainbow_tex()
+	var v := fposmod(distance * 0.0012, 1.0)   # palette cycle phase (was the per-band hue shift)
+	var poly := PackedVector2Array()
+	var uvs := PackedVector2Array()
+	for i in range(n):
+		poly.append(left[i])
+		uvs.append(Vector2(0.0, v))
+	for i in range(n - 1, -1, -1):
+		poly.append(right[i])
+		uvs.append(Vector2(1.0, v))
+	draw_colored_polygon(poly, Color.WHITE, uvs, _tex_rainbow)
+
+
+# RAINBOW_BANDS stripes across the width × 256 cycle phases down the rows. Sampled
+# nearest (the project's default filter), so u gives crisp hard stripes and v cycles
+# each stripe's hue through the wheel exactly as the old per-band shift did.
+func _build_rainbow_tex() -> void:
 	var bands := 7
-	var shift := distance * 0.0012
-	for k in range(bands):
-		var f0 := float(k) / float(bands)
-		var f1 := float(k + 1) / float(bands)
-		var poly := PackedVector2Array()
-		for i in range(n):
-			poly.append(left[i].lerp(right[i], f0))
-		for i in range(n - 1, -1, -1):
-			poly.append(left[i].lerp(right[i], f1))
-		var hue := fposmod(f0 + shift, 1.0)
-		draw_colored_polygon(poly, Color.from_hsv(hue, 0.85, 1.0))
+	var rows := 256
+	var img := Image.create(bands, rows, false, Image.FORMAT_RGBA8)
+	for t in range(rows):
+		var shift := float(t) / float(rows)
+		for k in range(bands):
+			var hue := fposmod(float(k) / float(bands) + shift, 1.0)
+			img.set_pixel(k, t, Color.from_hsv(hue, 0.85, 1.0))
+	_tex_rainbow = ImageTexture.create_from_image(img)
 
 
 # Centre line. Off-road / track themes paint none. Each dash is drawn as ONE
@@ -2585,25 +2663,62 @@ func _fill_rainbow(left: PackedVector2Array, right: PackedVector2Array) -> void:
 # An optional mask suppresses samples (used so a fork's second lane line is painted
 # only where that lane has actually parted from the first — where they coincide a
 # single line is drawn, instead of two overlapping ones that flickered bolder).
+#
+# Each dash starts/ends at the EXACT world-distance where the on/off phase flips,
+# interpolated between the bracketing samples, rather than snapping to whichever
+# 3px sample happened to be "on". Snapping made every dash end jump by up to a
+# sample each frame as the road scrolled — the residual twitch in the lane lines.
 func _draw_dashes(centers: Array, mask := PackedInt32Array()) -> void:
 	if not _theme_stripes:
 		return
 	var use_mask := mask.size() == centers.size()
 	var seg := PackedVector2Array()
+	var prev := Vector3.ZERO
+	var prev_on := false
+	var prev_gate := false
 	for i in range(centers.size()):
 		var p: Vector3 = centers[i]
-		# leave the opening stretch unmarked so the on-road control prompts read clean
-		var on := p.z >= INTRO_DIST and fposmod(p.z, DASH_PERIOD) < DASH_PERIOD * 0.5
-		if use_mask and mask[i] == 0:
-			on = false
-		if on:
-			seg.append(Vector2(p.x, p.y))
-		else:
+		# the opening stretch and (for the 2nd lane line) un-parted rows are gated off
+		var gate := p.z >= INTRO_DIST and (not use_mask or mask[i] == 1)
+		var phase_on := fposmod(p.z, DASH_PERIOD) < DASH_PERIOD * 0.5
+		var on := gate and phase_on
+		if i > 0 and on != prev_on and gate and prev_gate:
+			# a phase flip between two live samples: split exactly at the boundary
+			var edge := _dash_edge(prev, p)
+			if on:
+				if seg.size() >= 2:
+					draw_polyline(seg, col_dash, 5.0, true)
+				seg = PackedVector2Array()
+				seg.append(edge)
+			else:
+				seg.append(edge)
+				if seg.size() >= 2:
+					draw_polyline(seg, col_dash, 5.0, true)
+				seg = PackedVector2Array()
+		elif on != prev_on and not on:
+			# gated off (intro / un-parted lane): just cut at the sample
 			if seg.size() >= 2:
 				draw_polyline(seg, col_dash, 5.0, true)
 			seg = PackedVector2Array()
+		if on:
+			seg.append(Vector2(p.x, p.y))
+		prev = p
+		prev_on = on
+		prev_gate = gate
 	if seg.size() >= 2:
 		draw_polyline(seg, col_dash, 5.0, true)
+
+
+# Exact point between samples a and b (each Vector3 of screen-x, screen-y, world-d)
+# where the dash on/off phase boundary falls — the nearest DASH_PERIOD/2 multiple
+# between their world-distances. Interpolating to it keeps dash ends sub-pixel
+# stable instead of snapping to the sampling grid.
+func _dash_edge(a: Vector3, b: Vector3) -> Vector2:
+	var half := DASH_PERIOD * 0.5
+	var m := ceilf(minf(a.z, b.z) / half) * half
+	var span := a.z - b.z
+	var t := 0.5 if absf(span) < 0.0001 else clampf((a.z - m) / span, 0.0, 1.0)
+	return Vector2(lerpf(a.x, b.x, t), lerpf(a.y, b.y, t))
 
 
 # Median kerb around a fork's grass gore. The gore is where the right lane's inner
