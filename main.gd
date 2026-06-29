@@ -17,9 +17,20 @@ const CAR_W := 50.0
 const CAR_H := 90.0
 const CAR_HALF_W := CAR_W * 0.5
 const CAR_HALF_H := CAR_H * 0.5
+# Canonical collision footprint used by the GENERATION fairness maths (gap sizes,
+# fork widths). The live collision box is _pl_hw/_pl_hh, which is this clamped DOWN
+# to the loaded sprite's opaque content (see _content_half) — so collisions follow
+# the visible car, never the transparent rect, and never exceed what generation
+# already guaranteed passable.
 const COL_HALF_W := 19.0          # collision half-extents (smaller than the art = fairer)
 const COL_HALF_H := 36.0
 const ROAD_CENTER_X := 360.0
+
+# ---------------- retro / pixel-art look ----------------
+# VFX pixel grid. Matched to the car art's native resolution (25x45 source px shown
+# at 50x90 => ~2px per art-pixel), so blocky effects read at the same scale as the
+# car instead of as coarse chunks. Road EDGES are drawn smooth (see _draw_road).
+const PIX := 2.0
 
 # ---------------- camera ----------------
 const CAM_FOLLOW := 6.0
@@ -29,14 +40,14 @@ const CAM_LOOK_W := 0.30
 const GRID := 110.0               # parallax ground grid spacing
 
 # ---------------- difficulty ----------------
-const BASE_SPEED := 290.0
-const SPEED_PER_SEC := 1.8        # climbs to MAX over ~2 min, so acceleration is actually felt
-const MAX_SPEED := 520.0
+const BASE_SPEED := 330.0
+const SPEED_PER_SEC := 2.6        # climbs to MAX sooner, so the run gets exciting faster
+const MAX_SPEED := 560.0
 const START_HALF_WIDTH := 200.0
 const MIN_HALF_WIDTH := 120.0
 const NARROW_PER_DIST := 0.0007   # road narrows by distance (visible ahead, fair)
 const RAMP_SECONDS := 220.0
-const INTRO_DIST := 1500.0        # straight, hazard-free start
+const INTRO_DIST := 800.0         # straight, hazard-free start (short: the first decision comes fast)
 const MAX_STRAIGHT_RUN := 950.0   # it's "Twisty Roads": force a bend if the road runs this straight
 
 # Rhythm curve: periodic "breather" sections where the road widens (speed stays
@@ -82,13 +93,17 @@ const DASH_PERIOD := 90.0
 # be multi-valued.
 const BRANCH_SPACING := 7000.0    # min gap between one fork ending and the next starting
 const FORK_LEN_MIN := 700.0       # forks are short, technical sections — not long straights
-const FORK_LEN_MAX := 1500.0      # hard ceiling so even the widest early fork stays short
+# Ceiling kept high enough that it never clamps a fork BELOW its sweep-cap minimum
+# length: now that forks run at the real boosted top speed, the fairness-minimum
+# length grew ~BOOST_MULT, so a lower ceiling would have silently produced forks
+# that peel faster than the player can steer. Typical forks still land ~1.4–1.8k.
+const FORK_LEN_MAX := 2300.0
 const BRANCH_RAMP := 0.30         # fraction of a fork's length spent splitting / merging
 const LANE_FRAC := 0.62           # split-lane half-width as a fraction of the local road
 const LANE_HW_MIN := 84.0         # lanes never narrower than this (keeps a passing corridor + steer room)
 const LANE_HW_MAX := 98.0         # ...nor wider than this, so wide early roads still make SHORT forks
 const FORK_MEDIAN_FRAC := 0.12    # fork median half-width as a fraction of the local road
-const FORK_SWEEP_CAP := 320.0     # peak sideways peel speed of a lane; forks are sized so this holds at the (non-boosted) top speed they're driven at
+const FORK_SWEEP_CAP := 320.0     # peak sideways peel speed of a lane: forks are LENGTH-sized so this holds even at the real (boosted) top speed they're now driven at — a sideways-trackability fairness bound, not a forward-speed cap
 const BRANCH_STRAIGHT_DELTA := 48.0  # entry must be at least this straight (per 300px)
 const BRANCH_MAX_DRIFT := 150.0   # max sideways drift of the road across a fork; small => the straightened chord barely deviates, so the axis transient stays gentle on short forks
 const BRANCH_COINS := 4           # coins seeded along the scenic lane
@@ -106,19 +121,15 @@ const FORK_ASYM_CHANCE := 0.5     # chance a fork is lopsided rather than mirror
 const SHOULDER_CHANCE := 0.4      # chance a branch is a bailout shoulder instead of a fork
 
 # Forks aren't dead-straight cruises: a gentle sideways WAVE (faded in/out at the
-# merges so it stays seamless) makes the split wind, and each fork is seeded with
-# avoidable TRAFFIC (cars that hug one side of a lane, leaving a clean passing gap
-# that never closes) plus the odd OIL slick — so committing to a side is a real
-# test. The wave is kept small enough that a lane never moves sideways faster than
-# the player can track at the speed forks are driven at.
+# merges so it stays seamless) makes the split wind. The wave is kept small enough
+# that a lane never moves sideways faster than the player can track even at the real
+# top speed forks are now driven at. Forks no longer carry their own SCRIPTED
+# traffic/oil — hazards inside a fork come from the same systemic generator as the
+# rest of the road (see _try_fork_hazard), so a fork reads as ordinary road that
+# happens to split, not a separate mini-game with bespoke obstacles.
 const FORK_WAVE_AMP := 8.0        # max sideways wander added across a fork
 const FORK_WAVE_LEN := 820.0      # wavelength of that wander
 const FORK_WAVE_CHANCE := 0.8     # chance a fork winds rather than running straight
-const FORK_OIL_CHANCE := 0.4      # chance a fork is seeded with oil slicks
-const FORK_OIL_MAX := 2           # up to this many oil slicks across a fork's lanes
-const FORK_TRAFFIC_CHANCE := 0.8  # chance a fork is seeded with avoidable traffic
-const FORK_TRAFFIC_MAX := 2       # up to this many cars across a fork's lanes
-const FORK_TRAFFIC_GAP := 46.0    # passing room (car-center) a fork car must leave to be placed
 
 # Bailout shoulder: the main road stays full width and a narrower coin lane
 # sprouts from ONE shoulder, bulges out around a grass median, then merges back —
@@ -142,6 +153,14 @@ const COL_COIN_HI := Color("fff3c4")
 const HAZARD_SPACING := 560.0
 const STRAIGHT_DELTA := 30.0      # only spawn where the road is this straight
 const GAP_MIN := 50.0             # guaranteed passable gap (car-center room)
+# Fairness buffers: never drop a hazard right after a forced high-friction move.
+# A fork's exit merge is a "blind sweep" (lanes folding back together) and a jump
+# landing eats a reserved runway — both get a clear stretch so the player is never
+# punished the instant a forced sequence ends. (Jump runways are also reserved at
+# spawn time; this is the belt-and-braces rule applied uniformly to forks.)
+const POST_BRANCH_CLEAR := 520.0  # clear road after a fork merges back
+const PRE_BRANCH_CLEAR := 280.0   # clear road just before a fork splits (so the choice reads clean)
+const FORK_HAZARD_GUARD := 0.06   # extra margin past a lane's ramp before a fork may host a hazard (keeps hazards out of the peel sweep)
 const BLOCK_W := 60.0
 const BLOCK_H := 42.0
 const TRAFFIC_W := 50.0
@@ -208,7 +227,7 @@ const GAUGE_R := 84.0
 const GAUGE_START_DEG := 140.0
 const GAUGE_END_DEG := 400.0
 const GAUGE_MIN_KMH := 90.0       # dial floor (just below start speed) so the needle has room to climb
-const GAUGE_MAX_KMH := 340.0      # ~MAX_SPEED * BOOST_MULT converted to km/h
+const GAUGE_MAX_KMH := 370.0      # ~MAX_SPEED * BOOST_MULT converted to km/h
 const COL_GAUGE_BG := Color(0, 0, 0, 0.35)
 const COL_GAUGE_RING := Color(1, 1, 1, 0.25)
 const COL_GAUGE_TICK := Color(1, 1, 1, 0.4)
@@ -227,8 +246,19 @@ const SAVE_PATH := "user://twisty_roads.cfg"
 # unnumbered single file. Lists let a theme ship several car/prop variants.
 const ART_DIR := "res://art/"
 const ART_EXTS := ["png", "webp", "jpg", "jpeg", "svg"]
+const ART_LIST_MAX := 32          # highest index scanned for numbered series (enemy_0..enemy_31); gaps are fine
 const ROAD_TEX_TILE := 220.0      # world-distance the road texture spans before repeating
 const BG_TEX_PARALLAX := 0.45     # how much the background texture scrolls vs the world
+
+# ---------------- font ----------------
+# Convention-based, like the art/audio: drop a TTF/OTF at res://fonts/<name> and
+# it's used for the whole UI; missing -> the engine default. The retro art
+# direction wants DotGothic16, so it's tried first. Loaded with load_dynamic_font
+# so it works at runtime without an editor import step, and rendered with
+# antialiasing OFF so it stays crisp and pixel-true.
+const FONT_DIR := "res://fonts/"
+const FONT_NAMES := ["DotGothic16-Regular", "DotGothic16", "dotgothic16"]
+const FONT_EXTS := ["ttf", "otf"]
 
 # ---------------- themes ----------------
 # Palettes are placeholders that approximate each theme until real sprites land.
@@ -300,6 +330,7 @@ var col_car: Color
 var col_car_dark: Color
 var col_deco: Color                # tint for primitive background props
 var _theme_stripes := true         # does the current theme paint a centre line?
+var _theme_rainbow := false        # Rainbow Lane paints the road surface itself as a rainbow
 
 # Convention-loaded theme art (null = use the primitive fallback). Mirrors audio.
 var _tex_road: Texture2D
@@ -307,6 +338,14 @@ var _tex_bg: Texture2D
 var _tex_car: Texture2D
 var _tex_enemy: Array[Texture2D] = []
 var _tex_deco: Array[Texture2D] = []
+
+# Live collision half-extents. Default to the canonical footprint; once a sprite is
+# loaded they shrink to its opaque content so collisions ignore transparent pixels
+# (see _load_theme_art / _content_half). Always <= COL_HALF_*, so every generation
+# fairness guarantee (which assumes the canonical box) still holds.
+var _pl_hw := COL_HALF_W
+var _pl_hh := COL_HALF_H
+var _enemy_col: Array = []         # per enemy-sprite collision half-extents (Vector2)
 
 var _pt_d := PackedFloat32Array()
 var _pt_x := PackedFloat32Array()
@@ -398,7 +437,7 @@ func _ready() -> void:
 	randomize()
 	# lets a road texture tile along its length via UVs > 1 (see _fill_band)
 	texture_repeat = CanvasItem.TEXTURE_REPEAT_ENABLED
-	_ui_font = ThemeDB.fallback_font
+	_ui_font = _load_ui_font()
 	_micro_noise.frequency = 0.01
 	_load_save()
 	_apply_theme(selected)
@@ -481,7 +520,9 @@ func _apply_theme(id: String) -> void:
 	col_dash = Color(t["dash"])
 	col_car = Color(t["car"])
 	col_car_dark = Color(t["car_dark"])
-	_theme_stripes = bool(t.get("stripes", true))
+	_theme_rainbow = id == "rainbow"
+	# Rainbow Lane is the road itself (a rainbow surface), so it paints no centre line
+	_theme_stripes = bool(t.get("stripes", true)) and not _theme_rainbow
 	# primitive prop tint: keep it readable whatever the ground colour is
 	if col_offroad.get_luminance() < 0.4:
 		col_deco = col_offroad.lightened(0.32)
@@ -512,19 +553,19 @@ func _load_tex(theme_id: String, slot: String) -> Texture2D:
 
 # A slot may ship as a single file (slot.png) or a numbered series
 # (slot_0.png, slot_1.png, ...). Returns the theme's own set, else the default's.
+# The numbered scan covers a fixed range and COLLECTS whatever exists, so a series
+# with gaps (e.g. only enemy_1.png) still loads instead of stopping at the first
+# missing index.
 func _load_tex_list(theme_id: String, slot: String) -> Array[Texture2D]:
 	for tid in [theme_id, "default"]:
 		var out: Array[Texture2D] = []
 		var single := _load_tex_exact(tid, slot)
 		if single != null:
 			out.append(single)
-		var i := 0
-		while true:
+		for i in range(ART_LIST_MAX):
 			var t := _load_tex_exact(tid, "%s_%d" % [slot, i])
-			if t == null:
-				break
-			out.append(t)
-			i += 1
+			if t != null:
+				out.append(t)
 		if out.size() > 0:
 			return out
 	return []
@@ -536,6 +577,79 @@ func _load_theme_art(id: String) -> void:
 	_tex_car = _load_tex(id, "car")
 	_tex_enemy = _load_tex_list(id, "enemy")
 	_tex_deco = _load_tex_list(id, "deco")
+	# Derive collision boxes from the loaded sprites' opaque content, clamped down to
+	# the canonical footprint so generation fairness is preserved (see _pl_hw note).
+	_pl_hw = COL_HALF_W
+	_pl_hh = COL_HALF_H
+	if _tex_car != null:
+		var e := _content_half(_tex_car, CAR_W, CAR_H)
+		_pl_hw = minf(COL_HALF_W, e.x)
+		_pl_hh = minf(COL_HALF_H, e.y)
+	_enemy_col.clear()
+	for t in _tex_enemy:
+		var ee := _content_half(t, TRAFFIC_W, TRAFFIC_H)
+		_enemy_col.append(Vector2(minf(TRAFFIC_W * 0.5, ee.x), minf(TRAFFIC_H * 0.5, ee.y)))
+
+
+# Half-extents (world px) of a sprite's OPAQUE content, mapped into the on-screen
+# draw rect (full_w x full_h). Transparent margins are excluded, so a hitbox built
+# from this follows the visible vehicle rather than its bounding rectangle. Falls
+# back to the full half-rect if the image can't be inspected.
+func _content_half(tex: Texture2D, full_w: float, full_h: float) -> Vector2:
+	var fallback := Vector2(full_w * 0.5, full_h * 0.5)
+	if tex == null:
+		return fallback
+	var img := tex.get_image()
+	if img == null:
+		return fallback
+	if img.is_compressed():
+		img = img.duplicate()
+		if img.decompress() != OK:
+			return fallback
+	var w := img.get_width()
+	var h := img.get_height()
+	if w <= 0 or h <= 0:
+		return fallback
+	var minx := w
+	var maxx := -1
+	var miny := h
+	var maxy := -1
+	var step := maxi(1, int(maxf(float(w), float(h)) / 64.0))   # subsample large sprites for speed
+	for yy in range(0, h, step):
+		for xx in range(0, w, step):
+			if img.get_pixel(xx, yy).a > 0.30:
+				minx = mini(minx, xx)
+				maxx = maxi(maxx, xx)
+				miny = mini(miny, yy)
+				maxy = maxi(maxy, yy)
+	if maxx < 0:
+		return fallback   # fully transparent — keep the full box rather than a zero one
+	var fx := clampf(float(maxx - minx + step) / float(w), 0.15, 1.0)
+	var fy := clampf(float(maxy - miny + step) / float(h), 0.15, 1.0)
+	return Vector2(full_w * 0.5 * fx, full_h * 0.5 * fy)
+
+
+func _enemy_half(idx: int) -> Vector2:
+	if _enemy_col.is_empty():
+		return Vector2(TRAFFIC_W * 0.5, TRAFFIC_H * 0.5)
+	return _enemy_col[idx % _enemy_col.size()]
+
+
+# Convention-loaded UI font (DotGothic16 if present). load_dynamic_font means it
+# works at runtime with no editor import. Antialiasing is left ON (grayscale): with
+# it off, this pixel font's glyphs snap unevenly at non-native sizes and the text
+# looks lumpy/inconsistent — AA keeps letter sizing and spacing uniform.
+func _load_ui_font() -> Font:
+	for nm in FONT_NAMES:
+		for ext in FONT_EXTS:
+			var p := "%s%s.%s" % [FONT_DIR, nm, ext]
+			if FileAccess.file_exists(p):
+				var f := FontFile.new()
+				if f.load_dynamic_font(p) == OK:
+					f.antialiasing = TextServer.FONT_ANTIALIASING_GRAY
+					f.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_DISABLED
+					return f
+	return ThemeDB.fallback_font
 
 
 # ============================================================
@@ -668,6 +782,8 @@ func _make_label(parent: Control, text: String, pos: Vector2, size: Vector2, fsi
 	l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	l.add_theme_font_size_override("font_size", fsize)
+	if _ui_font != null:
+		l.add_theme_font_override("font", _ui_font)
 	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	parent.add_child(l)
 	return l
@@ -679,6 +795,8 @@ func _make_button(parent: Control, text: String, pos: Vector2, size: Vector2, fs
 	b.position = pos
 	b.size = size
 	b.add_theme_font_size_override("font_size", fsize)
+	if _ui_font != null:
+		b.add_theme_font_override("font", _ui_font)
 	b.pressed.connect(func(): _play_sfx(_sfx_ui))
 	parent.add_child(b)
 	return b
@@ -722,7 +840,9 @@ func _reset_world() -> void:
 	_deco_frontier_d = 0.0
 	_branches.clear()
 	_branch_frontier_d = 0.0
-	_next_branch_d = INTRO_DIST + 1200.0
+	# first fork comes soon after the (now short) intro, so the first real decision
+	# lands within a few seconds of the run starting
+	_next_branch_d = INTRO_DIST + 500.0
 	_streak = 0
 	_streak_best = 0
 	_no_coin_timer = 0.0
@@ -769,7 +889,7 @@ func _start_run() -> void:
 	_ensure_decos(distance + _gen_ahead)
 	_hud_score.text = "0"
 	_hud_coins.text = "Coins: 0"
-	_hud_prompt.visible = true
+	_hud_prompt.visible = false   # the start prompt is painted on the road (see _draw_track_hints)
 	_show_screen()
 
 
@@ -800,7 +920,7 @@ func _crash() -> void:
 	state = State.CRASH
 	_crash_timer = CRASH_TIME
 	Input.vibrate_handheld(220)
-	_spawn_explosion(_sx(car_x), _car_y)
+	_spawn_explosion(car_x, distance)   # world-anchored: plays where the car hit
 	_engine_low.stop()
 	_engine_high.stop()
 	_play_sfx(_sfx_crash)
@@ -1028,8 +1148,8 @@ func _update_play(delta: float) -> void:
 		_no_coin_best = _no_coin_timer
 
 	# Boost only lets you smash THROUGH objects (see _update_hazards) — it grants no
-	# immunity to driving off the road. A fork caps your speed to the non-boosted top
-	# speed (see current_speed) so a boosted peel can never out-run your steering.
+	# immunity to driving off the road. Forks are sized so even a boosted peel never
+	# out-runs your steering (see _make_fork), so no special in-fork speed cap is needed.
 	if not airborne and not _on_any_lane(distance, car_x):
 		_crash()
 		return
@@ -1102,8 +1222,16 @@ func _ensure_hazards(up_to: float) -> void:
 		var d := _hazard_frontier_d
 		if d < INTRO_DIST:
 			continue
-		if _in_branch(d):
-			continue   # the fork itself is the challenge here
+		var b := _branch_at(d)
+		if not b.is_empty():
+			# Inside a fork the same generator runs, just placed against a lane's
+			# geometry instead of the centerline — so a fork carries ordinary road
+			# hazards (organically, fairly) rather than its own scripted set.
+			_try_fork_hazard(b, d)
+			continue
+		# never the instant a forced sequence (a fork sweep) ends or begins
+		if _hazard_blocked_near_branch(d):
+			continue
 		# only place where the road is roughly straight, so it's always avoidable
 		if absf(road_center(d + 50.0) - road_center(d - 50.0)) > STRAIGHT_DELTA:
 			continue
@@ -1148,6 +1276,85 @@ func _flush_side(bandh: float, eff: float) -> float:
 	return -(bandh - eff)
 
 
+# True if d sits in the clear stretch just after a fork merges (a "blind sweep"
+# ending) or just before one splits — keeps ordinary hazards from ambushing the
+# player the instant a forced sequence begins or ends.
+func _hazard_blocked_near_branch(d: float) -> bool:
+	for b in _branches:
+		var d0 := float(b["d0"])
+		var d1 := float(b["d1"])
+		if d > d1 - 1.0 and d < d1 + POST_BRANCH_CLEAR:
+			return true
+		if d > d0 - PRE_BRANCH_CLEAR and d < d0:
+			return true
+	return false
+
+
+# True if a hazard footprint at (d, x) would overlap an existing (uncollected)
+# coin — used so fork hazards never bury a fork's reward coins.
+func _hazard_hits_coin(d: float, x: float, half_w: float, half_h: float) -> bool:
+	for coin in _coins:
+		if bool(coin.get("got", false)):
+			continue
+		if absf(float(coin["d"]) - d) < half_h + COIN_R and absf(float(coin["x"]) - x) < half_w + COIN_R:
+			return true
+	return false
+
+
+# One organic hazard inside a fork, placed against a chosen lane's geometry. Same
+# hazard vocabulary, spacing and gap guarantee as the open road — only the frame of
+# reference changes (a lane instead of the centerline). It only fires in the fork's
+# fully-split, NON-sweeping middle, leaves a clean passing gap in that lane, and
+# never lands on a coin — so whichever side the player commits to stays drivable.
+func _try_fork_hazard(b: Dictionary, d: float) -> void:
+	if String(b.get("kind", "")) != "fork":
+		return   # shoulders keep a full-width safe through-lane; leave it clean
+	var d0 := float(b["d0"])
+	var d1 := float(b["d1"])
+	var t := (d - d0) / maxf(d1 - d0, 1.0)
+	# stay clear of both lanes' peel ramps so we never spawn during a sideways sweep
+	var rmax := maxf(float(b["lane0"].get("ramp", BRANCH_RAMP)), float(b["lane1"].get("ramp", BRANCH_RAMP)))
+	var guard := clampf(rmax + FORK_HAZARD_GUARD, 0.0, 0.49)
+	if t < guard or t > 1.0 - guard:
+		return
+	var li := randi() % 2
+	var lane: Dictionary = b["lane%d" % li]
+	var g := _lane_geom(b, lane, d, _branch_axis(b, d), road_half_width(d))
+	var c := float(g["c"])
+	var hw := float(g["hw"])
+	var bandh := hw - COL_HALF_W
+	var roll := randf()
+	if roll < 0.45:
+		# avoidable traffic hugging one edge of the lane; the in_fork tracker holds
+		# the gap open the whole way down (committed-but-avoidable)
+		if 2.0 * hw - TRAFFIC_W < 2.0 * COL_HALF_W + GAP_MIN:
+			return
+		var side := 1.0 if randf() < 0.5 else -1.0
+		var hx := c + side * maxf(hw - TRAFFIC_W * 0.5 - 2.0, 0.0)
+		if _hazard_hits_coin(d, hx, TRAFFIC_W * 0.5, TRAFFIC_H * 0.5):
+			return
+		_hazards.append({ "d": d, "x": hx, "type": "traffic", "lane": 0.0, "ang": 0.0,
+			"hit": false, "scored": false, "spd": randf_range(TRAFFIC_REL_MIN, TRAFFIC_REL_MAX),
+			"sprite": randi(), "in_fork": true, "fork_lane": li, "fork_side": side })
+	elif roll < 0.75:
+		# static block flush to one side, clean gap on the other
+		var eff := BLOCK_W * 0.5 + COL_HALF_W
+		if 2.0 * bandh < 2.0 * eff + GAP_MIN:
+			return
+		var bx := c + _flush_side(bandh, eff)
+		if _hazard_hits_coin(d, bx, BLOCK_W * 0.5, BLOCK_H * 0.5):
+			return
+		_hazards.append({ "d": d, "x": bx, "type": "block", "lane": 0.0, "ang": 0.0, "hit": false, "scored": false })
+	else:
+		# oil slick: makes you slip, never blocks
+		if bandh < OIL_R * 0.6 + 20.0:
+			return
+		var ox := c + randf_range(-0.3, 0.3) * maxf(bandh - OIL_R * 0.4, 0.0)
+		if _hazard_hits_coin(d, ox, OIL_R, OIL_R):
+			return
+		_hazards.append({ "d": d, "x": ox, "type": "oil", "lane": 0.0, "ang": 0.0, "hit": false, "in_fork": true })
+
+
 # Plant a jump-the-gap set: a full-width ramp at d, a hole spanning the whole road
 # just ahead, and a clear runway reserved past it for the landing. The ramp is
 # wider than the road, so simply staying on the road guarantees the launch; the
@@ -1178,10 +1385,10 @@ func _spawn_jump_gap(d: float) -> float:
 func _smash_hazard(h: Dictionary) -> void:
 	h["dead"] = true
 	session_coins += RAM_COINS
-	var sxp := _sx(float(h["x"]))
-	var syp := _car_y - (float(h["d"]) - distance)
-	_spawn_explosion(sxp, syp)
-	_add_popup(sxp, syp - 24.0, "SMASH! +%d" % RAM_COINS, true, 240.0, true)
+	# explosion is anchored to the WORLD point it happened at, so it stays on the
+	# road as the camera scrolls past instead of sliding across the screen
+	_spawn_explosion(float(h["x"]), float(h["d"]))
+	_add_popup(_sx(float(h["x"])), _car_y - (float(h["d"]) - distance) - 24.0, "SMASH! +%d" % RAM_COINS, true, 240.0, true)
 	Input.vibrate_handheld(40)
 	_play_sfx(_sfx_smash)
 
@@ -1193,8 +1400,10 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 			continue
 		var htype: String = h["type"]
 		if htype == "traffic":
-			# closing speed scales with the player's speed (enemies get faster too)
-			h["d"] = float(h["d"]) - current_speed() * float(h["spd"]) * delta
+			# Each car has its own (varied) closing speed that scales only with the
+			# difficulty ramp, NOT with the player's boost — so boosting never drags
+			# the traffic along with you.
+			h["d"] = float(h["d"]) - _ramp_speed() * float(h["spd"]) * delta
 			var td := float(h["d"])
 			var oldx := float(h["x"])
 			var nx: float
@@ -1219,7 +1428,7 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 		var dy := absf(hd - distance)
 		var dx := absf(hx - car_x)
 		if htype == "block":
-			if not airborne and dy < COL_HALF_H + BLOCK_H * 0.5 and dx < COL_HALF_W + BLOCK_W * 0.5:
+			if not airborne and dy < _pl_hh + BLOCK_H * 0.5 and dx < _pl_hw + BLOCK_W * 0.5:
 				if ramming:
 					_smash_hazard(h)
 					continue
@@ -1227,13 +1436,16 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 				return
 			# near miss: squeezed past a static block without crashing -> reward
 			# (never while ramming — a smash already paid out for this one)
-			if not ramming and not h["scored"] and dy < COL_HALF_H + BLOCK_H * 0.5 + 20.0 and dx < NEAR_MISS_DX:
+			if not ramming and not h["scored"] and dy < _pl_hh + BLOCK_H * 0.5 + 20.0 and dx < NEAR_MISS_DX:
 				h["scored"] = true
 				session_coins += NEAR_MISS_COINS
 				_add_popup(_sx(car_x), _car_y - 60.0, "Near Miss! +%d" % NEAR_MISS_COINS, true, 220.0, true)
 				_play_sfx(_sfx_near_miss)
 		elif htype == "traffic":
-			if not airborne and dy < COL_HALF_H + TRAFFIC_H * 0.5 and dx < COL_HALF_W + TRAFFIC_W * 0.5:
+			# hitbox follows this enemy sprite's opaque content (and the player's), so
+			# nothing collides on transparent corners
+			var eh := _enemy_half(int(h.get("sprite", 0)))
+			if not airborne and dy < _pl_hh + eh.y and dx < _pl_hw + eh.x:
 				if ramming:
 					_smash_hazard(h)
 					continue
@@ -1241,7 +1453,7 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 				return
 			# near miss: passed close alongside without crashing -> reward
 			# (never while ramming — a smash already paid out for this one)
-			if not ramming and not h["scored"] and dy < COL_HALF_H + 20.0 and dx < NEAR_MISS_DX:
+			if not ramming and not h["scored"] and dy < _pl_hh + 20.0 and dx < NEAR_MISS_DX:
 				h["scored"] = true
 				session_coins += NEAR_MISS_COINS
 				_add_popup(_sx(car_x), _car_y - 60.0, "Near Miss! +%d" % NEAR_MISS_COINS, true, 220.0, true)
@@ -1260,13 +1472,13 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 		elif htype == "jump":
 			var jw: float = float(h.get("w", JUMP_W))
 			var jh: float = float(h.get("h", JUMP_H))
-			if not h["hit"] and dy < COL_HALF_H + jh * 0.5 and dx < COL_HALF_W + jw * 0.5:
+			if not h["hit"] and dy < _pl_hh + jh * 0.5 and dx < _pl_hw + jw * 0.5:
 				h["hit"] = true
 				_air_timer = AIR_TIME
 				_play_sfx(_sfx_jump)
 		elif htype == "gap":
 			# a hole across the whole road: sail over it airborne, or fall in
-			if not airborne and dy < float(h["len"]) * 0.5 + COL_HALF_H:
+			if not airborne and dy < float(h["len"]) * 0.5 + _pl_hh:
 				_crash()
 				return
 
@@ -1274,13 +1486,26 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 # ============================================================
 #  PARTICLES / TIRE MARKS / EXPLOSION
 # ============================================================
+# Particles/explosions are anchored to a WORLD point ("wx" world-x, "wd" distance)
+# plus a screen-space spread "off" that grows from their velocity — so they stay
+# put on the road as the world scrolls (an explosion plays where the crash happened)
+# instead of sliding across the screen with the camera. _boom_screen() resolves the
+# anchor to the current screen position.
+func _boom_screen(e: Dictionary) -> Vector2:
+	var base := Vector2(_sx(float(e["wx"])), _car_y - (float(e["wd"]) - distance))
+	return base + Vector2(e["off"])
+
+
 func _emit_exhaust(delta: float) -> void:
 	_exhaust_accum += delta
 	while _exhaust_accum > 0.04:
 		_exhaust_accum -= 0.04
-		var rear := Vector2(_sx(car_x) + randf_range(-6.0, 6.0), _car_y + CAR_HALF_H * 0.7)
 		var vel := Vector2(randf_range(-14.0, 14.0), randf_range(36.0, 70.0))
-		_particles.append({ "pos": rear, "vel": vel, "age": 0.0, "life": randf_range(0.4, 0.7), "r": randf_range(3.0, 6.0) })
+		_particles.append({
+			"wx": car_x + randf_range(-6.0, 6.0), "wd": distance - CAR_HALF_H * 0.7,
+			"off": Vector2.ZERO, "vel": vel,
+			"age": 0.0, "life": randf_range(0.4, 0.7), "r": randf_range(3.0, 6.0),
+		})
 
 
 func _update_particles(delta: float) -> void:
@@ -1291,20 +1516,19 @@ func _update_particles(delta: float) -> void:
 		if float(p["age"]) >= float(p["life"]):
 			_particles.remove_at(i)
 		else:
-			var pos: Vector2 = p["pos"]
 			var vel: Vector2 = p["vel"]
-			p["pos"] = pos + vel * delta
+			p["off"] = Vector2(p["off"]) + vel * delta
 			p["vel"] = vel * (1.0 - 1.4 * delta)
 		i -= 1
 
 
-func _spawn_explosion(sx_pos: float, sy_pos: float) -> void:
+func _spawn_explosion(wx: float, wd: float) -> void:
 	var cols := [Color("ffd54a"), Color("ff8c1a"), Color("e74c3c"), Color("ffffff")]
 	for n in range(34):
 		var a := randf() * TAU
 		var sp := randf_range(70.0, 340.0)
 		_boom.append({
-			"pos": Vector2(sx_pos, sy_pos),
+			"wx": wx, "wd": wd, "off": Vector2.ZERO,
 			"vel": Vector2(cos(a), sin(a)) * sp,
 			"age": 0.0, "life": randf_range(0.4, 0.95),
 			"r": randf_range(4.0, 11.0),
@@ -1320,9 +1544,8 @@ func _update_boom(delta: float) -> void:
 		if float(b["age"]) >= float(b["life"]):
 			_boom.remove_at(i)
 		else:
-			var pos: Vector2 = b["pos"]
 			var vel: Vector2 = b["vel"]
-			b["pos"] = pos + vel * delta
+			b["off"] = Vector2(b["off"]) + vel * delta
 			b["vel"] = vel * (1.0 - 2.2 * delta)
 		i -= 1
 
@@ -1367,15 +1590,13 @@ func _breather(d: float) -> float:
 
 
 func current_speed() -> float:
+	# Boost applies everywhere now — forks run at the game's real speed, not a
+	# throttled mini-game. Fork lengths are sized (see _make_fork) so a lane never
+	# peels sideways faster than you can steer even at this boosted top speed, which
+	# is what keeps them fair without an artificial forward-speed cap.
 	var s := _ramp_speed()
 	if _boost_timer > 0.0:
-		# Inside a FORK, boost adds no speed: forks are sized to be trackable at the
-		# non-boosted top speed, so this is what keeps a peeling lane fair without
-		# any off-road immunity. You can still smash through fork traffic. Shoulders
-		# keep their full-width safe lane, so they stay boosted.
-		var b := _branch_at(distance)
-		if b.is_empty() or String(b.get("kind", "")) != "fork":
-			s *= BOOST_MULT
+		s *= BOOST_MULT
 	return s
 
 
@@ -1638,8 +1859,8 @@ func _in_branch(d: float) -> bool:
 # still counts as on-road. Collisions therefore happen only on real contact with a
 # visible edge — never on a phantom median that closed before the lanes met.
 func _on_any_lane(d: float, x: float) -> bool:
-	var lo := x - COL_HALF_W
-	var hi := x + COL_HALF_W
+	var lo := x - _pl_hw
+	var hi := x + _pl_hw
 	for span in _road_spans(d):
 		if lo >= span.x - 0.01 and hi <= span.y + 0.01:
 			return true
@@ -1707,7 +1928,6 @@ func _ensure_branches(up_to: float) -> void:
 		b["cx1"] = road_center(d1)
 		_branches.append(b)
 		_seed_branch_coins(b)
-		_seed_fork_hazards(b)
 		_next_branch_d = d1 + BRANCH_SPACING * randf_range(0.85, 1.25)
 
 
@@ -1732,13 +1952,12 @@ func _make_fork(d0: float, rhw: float) -> Dictionary:
 	var ramp_l := BRANCH_RAMP * (1.0 + (randf_range(-FORK_RAMP_VARY, FORK_RAMP_VARY) if asym else 0.0))
 	var ramp_r := BRANCH_RAMP * (1.0 + (randf_range(-FORK_RAMP_VARY, FORK_RAMP_VARY) if asym else 0.0))
 	# length: keep even the widest, fastest-peeling lane within the sweep cap at the
-	# TOP SPEED a fork is driven at (non-boosted — current_speed() caps boost inside
-	# forks), then stretch it by a small random factor. Sizing for MAX_SPEED instead
-	# of the boosted speed is what lets forks stay short without ever out-peeling your
-	# steering.
+	# REAL top speed a fork is now driven at (boost applies in forks), then stretch it
+	# by a small random factor. Sizing against the sweep cap is what lets a fork run at
+	# full speed without ever out-peeling your steering — the fairness bound, kept.
 	var max_off := maxf(off_l, off_r)
 	var min_ramp := clampf(minf(ramp_l, ramp_r), 0.05, 0.5)
-	var min_len := maxf(FORK_LEN_MIN, max_off * 1.5 * MAX_SPEED / (min_ramp * FORK_SWEEP_CAP))
+	var min_len := maxf(FORK_LEN_MIN, max_off * 1.5 * MAX_SPEED * BOOST_MULT / (min_ramp * FORK_SWEEP_CAP))
 	var fork_len := minf(min_len * randf_range(1.0, FORK_LEN_VARY_MAX), FORK_LEN_MAX)
 	# gentle wind: amplitude is held under what the player can still track once it is
 	# stacked on the split peel (verified in the fairness harness)
@@ -1804,42 +2023,6 @@ func _seed_branch_coins(b: Dictionary) -> void:
 		_coins.append({ "d": dd, "x": float(g["c"]), "got": false, "missed": false })
 
 
-# Scatter OIL slicks down a fork's lanes so committing to a side is a real test,
-# not a straight cruise. Everything seeded here is AVOIDABLE within the lane you
-# commit to: oil only makes you slip (never blocks), and a fork car hugs one side
-# of its lane leaving a clean passing gap that it holds the whole way down — so
-# whichever side you pick is always drivable, the fork just demands real steering.
-func _seed_fork_hazards(b: Dictionary) -> void:
-	if String(b.get("kind", "")) != "fork":
-		return
-	var d0 := float(b["d0"])
-	var d1 := float(b["d1"])
-	# avoidable traffic, hugging one edge of a lane wide enough to pass
-	if randf() < FORK_TRAFFIC_CHANCE:
-		for k in range(randi_range(1, FORK_TRAFFIC_MAX)):
-			var li := randi() % 2
-			var lane: Dictionary = b["lane%d" % li]
-			var dd := lerpf(d0, d1, randf_range(0.30, 0.70))
-			var g := _lane_geom(b, lane, dd, _branch_axis(b, dd), road_half_width(dd))
-			var hw := float(g["hw"])
-			if 2.0 * hw - TRAFFIC_W < 2.0 * COL_HALF_W + FORK_TRAFFIC_GAP:
-				continue   # lane too thin here to leave a fair gap — skip
-			var side := 1.0 if randf() < 0.5 else -1.0
-			var off := side * maxf(hw - TRAFFIC_W * 0.5 - 2.0, 0.0)
-			_hazards.append({ "d": dd, "x": float(g["c"]) + off, "type": "traffic",
-				"lane": 0.0, "ang": 0.0, "hit": false, "scored": false,
-				"spd": randf_range(0.15, 0.4), "sprite": randi(),
-				"in_fork": true, "fork_lane": li, "fork_side": side })
-	# the odd oil slick on top
-	if randf() < FORK_OIL_CHANCE:
-		for k in range(randi_range(1, FORK_OIL_MAX)):
-			var lane2: Dictionary = b["lane%d" % (randi() % 2)]
-			var dd2 := lerpf(d0, d1, randf_range(0.28, 0.72))
-			var g2 := _lane_geom(b, lane2, dd2, _branch_axis(b, dd2), road_half_width(dd2))
-			var nudge := randf_range(-0.4, 0.4) * maxf(float(g2["hw"]) - OIL_R * 0.5, 0.0)
-			_hazards.append({ "d": dd2, "x": float(g2["c"]) + nudge, "type": "oil", "lane": 0.0, "ang": 0.0, "hit": false, "in_fork": true })
-
-
 func distance_at_row(y: float) -> float:
 	return distance + (_car_y - y)
 
@@ -1854,8 +2037,8 @@ func _sx(wx: float) -> float:
 func _ensure_coins(up_to: float) -> void:
 	while _coin_frontier_d < up_to:
 		_coin_frontier_d += COIN_SPACING * randf_range(0.8, 1.4)
-		if _coin_frontier_d < INTRO_DIST * 0.5:
-			continue
+		if _coin_frontier_d < INTRO_DIST:
+			continue   # no coins in the opening stretch (avoids restart-farming)
 		var d := _coin_frontier_d
 		if _in_branch(d):
 			continue   # branches seed their own coins along the scenic lane
@@ -1957,6 +2140,65 @@ func _car_angle() -> float:
 	return clampf(lateral_velocity / STEER_SPEED, -1.0, 1.0) * MAX_TILT
 
 
+# A filled square snapped to the PIX grid — the building block for the blocky VFX.
+func _draw_pix_square(center: Vector2, half: float, col: Color) -> void:
+	var s := maxf(PIX, roundf(half * 2.0 / PIX) * PIX)
+	var x := roundf((center.x - s * 0.5) / PIX) * PIX
+	var y := roundf((center.y - s * 0.5) / PIX) * PIX
+	draw_rect(Rect2(x, y, s, s), col)
+
+
+# Opening-stretch coaching painted on the road itself (the first stretch carries no
+# centre line, so it stays clear): the start prompt up front, then a left arrow
+# ("HOLD = LEFT") and a right arrow ("RELEASE = RIGHT") with the side matching the
+# live input lit up. Teaches the scheme through the track, not just HUD text, and
+# fades out as the intro ends so it never clutters real play.
+func _draw_track_hints() -> void:
+	if not (state == State.PLAYING or state == State.COUNTDOWN):
+		return
+	var fade := clampf((INTRO_DIST + 120.0 - distance) / 320.0, 0.0, 1.0)
+	if fade <= 0.0:
+		return
+	if not _run_started:
+		_draw_road_text(235.0, "TAP TO BEGIN", 48, Color(1, 1, 1, fade))
+		_draw_road_text(175.0, "hold to steer", 26, Color(1, 1, 1, fade * 0.8))
+	var holding := _input_down()
+	_draw_hint_arrow(400.0, -1.0, "HOLD", "= LEFT", holding, fade)
+	_draw_hint_arrow(620.0, 1.0, "RELEASE", "= RIGHT", not holding, fade)
+
+
+# Centred text drawn on the road surface at world-distance d, with a dark drop
+# shadow so it stays legible over any theme's asphalt.
+func _draw_road_text(d: float, text: String, size: int, col: Color) -> void:
+	if _ui_font == null:
+		return
+	var y := _car_y - (d - distance)
+	if y < -40.0 or y > _view_h + 40.0:
+		return
+	var cx := _sx(road_center(d))
+	var w := 520.0
+	draw_string(_ui_font, Vector2(cx - w * 0.5 + 2.0, y + 2.0), text, HORIZONTAL_ALIGNMENT_CENTER, w, size, Color(0, 0, 0, col.a * 0.6))
+	draw_string(_ui_font, Vector2(cx - w * 0.5, y), text, HORIZONTAL_ALIGNMENT_CENTER, w, size, col)
+
+
+func _draw_hint_arrow(d: float, dir: float, word: String, sub: String, active: bool, fade: float) -> void:
+	var y := _car_y - (d - distance)
+	if y < -70.0 or y > _view_h + 70.0:
+		return
+	var ax := _sx(road_center(d) + dir * 64.0)
+	var alpha := fade * (1.0 if active else 0.32)
+	var col := Color(1, 1, 1, alpha)
+	var dark := Color(0, 0, 0, alpha * 0.7)
+	var tip := Vector2(ax + dir * 30.0, y)
+	var a := Vector2(ax - dir * 12.0, y - 26.0)
+	var b := Vector2(ax - dir * 12.0, y + 26.0)
+	draw_polyline(PackedVector2Array([tip, a, b, tip]), dark, 6.0)
+	draw_colored_polygon(PackedVector2Array([tip, a, b]), col)
+	if _ui_font != null:
+		draw_string(_ui_font, Vector2(ax - 90.0, y + 48.0), word, HORIZONTAL_ALIGNMENT_CENTER, 180.0, 24, col)
+		draw_string(_ui_font, Vector2(ax - 90.0, y + 72.0), sub, HORIZONTAL_ALIGNMENT_CENTER, 180.0, 18, col)
+
+
 # Speed gauge: a swept dial (gap at the bottom) with a redline zone, tick
 # marks, and a needle, drawn in fixed screen space like the other HUD overlays.
 func _draw_speedometer() -> void:
@@ -2027,6 +2269,8 @@ func _draw() -> void:
 	if not in_game:
 		return
 
+	_draw_track_hints()   # on-road control prompts during the opening (under the car)
+
 	for m in _tire_marks:
 		var my := _car_y - (float(m["d"]) - distance)
 		var a := 1.0 - float(m["age"]) / TIRE_LIFE
@@ -2052,13 +2296,19 @@ func _draw() -> void:
 			for k in range(3):
 				draw_rect(Rect2(hx - BLOCK_W * 0.5 + 4.0 + k * 20.0, hy - BLOCK_H * 0.5, 9.0, BLOCK_H), COL_BLOCK_DARK)
 		elif ht == "traffic":
-			draw_set_transform(Vector2(hx, hy), float(h["ang"]), Vector2.ONE)
+			# Enemies are ONCOMING (they travel down-screen, toward the player), so
+			# their sprite must face DOWN — the art is authored nose-up like the
+			# player, so flip it vertically (and negate the steer-lean to match the
+			# flip) instead of drawing it driving backwards.
 			if _tex_enemy.size() > 0:
 				var et: Texture2D = _tex_enemy[int(h.get("sprite", 0)) % _tex_enemy.size()]
+				draw_set_transform(Vector2(hx, hy), -float(h["ang"]), Vector2(1.0, -1.0))
 				draw_texture_rect(et, Rect2(-TRAFFIC_W * 0.5, -TRAFFIC_H * 0.5, TRAFFIC_W, TRAFFIC_H), false)
 			else:
+				draw_set_transform(Vector2(hx, hy), float(h["ang"]), Vector2.ONE)
 				draw_rect(Rect2(-TRAFFIC_W * 0.5, -TRAFFIC_H * 0.5, TRAFFIC_W, TRAFFIC_H), COL_TRAFFIC)
-				draw_rect(Rect2(-TRAFFIC_W * 0.5 + 8.0, TRAFFIC_H * 0.5 - 48.0, TRAFFIC_W - 16.0, 30.0), COL_TRAFFIC_DARK)
+				# windshield toward the player (front of the oncoming car)
+				draw_rect(Rect2(-TRAFFIC_W * 0.5 + 8.0, TRAFFIC_H * 0.5 - 30.0, TRAFFIC_W - 16.0, 22.0), COL_TRAFFIC_DARK)
 			draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 		elif ht == "jump":
 			var jw: float = float(h.get("w", JUMP_W))
@@ -2093,8 +2343,7 @@ func _draw() -> void:
 		if rem > 0.0:
 			var ec := COL_EXHAUST
 			ec.a = rem * 0.35
-			var ppos: Vector2 = pp["pos"]
-			draw_circle(ppos, float(pp["r"]) * (0.6 + rem * 0.6), ec)
+			_draw_pix_square(_boom_screen(pp), float(pp["r"]) * (0.6 + rem * 0.6), ec)
 
 	# car (hidden once it has exploded; shown frozen during the resume countdown)
 	if state == State.PLAYING or state == State.COUNTDOWN:
@@ -2123,14 +2372,13 @@ func _draw() -> void:
 			draw_rect(Rect2(-CAR_HALF_W + 8.0, -CAR_HALF_H + 18.0, CAR_W - 16.0, 30.0), col_car_dark)
 		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
-	# explosion
+	# explosion — pixel debris (world-anchored, so it stays where the crash happened)
 	for b in _boom:
 		var brem := 1.0 - float(b["age"]) / float(b["life"])
 		if brem > 0.0:
 			var bcol: Color = b["col"]
 			bcol.a = brem
-			var bpos: Vector2 = b["pos"]
-			draw_circle(bpos, float(b["r"]) * (0.5 + brem * 0.8), bcol)
+			_draw_pix_square(_boom_screen(b), float(b["r"]) * (0.5 + brem * 0.8), bcol)
 
 	if state == State.PLAYING or state == State.COUNTDOWN or state == State.CRASH:
 		_draw_speedometer()
@@ -2279,7 +2527,7 @@ func _draw_road() -> void:
 	draw_polyline(r1, col_edge, 5.0, true)   # outer-right (always a boundary)
 	_draw_open_edge(r0, open)                # inner edges (median kerb) only where open
 	_draw_open_edge(l1, open)
-	_draw_median(r0, l1, open)               # painted nose caps at the gore tips
+	_draw_median(r0, l1, open)                # painted nose caps at the gore tips
 	_draw_dashes(cen0)
 	_draw_dashes(cen1)
 
@@ -2287,19 +2535,48 @@ func _draw_road() -> void:
 # Fills a road band, textured (tiling along its length via the vs/UV-v values when
 # a road texture is loaded) or flat-coloured otherwise.
 func _fill_band(left: PackedVector2Array, right: PackedVector2Array, vs := PackedFloat32Array()) -> void:
-	var poly := PackedVector2Array()
-	poly.append_array(left)
-	for i in range(right.size() - 1, -1, -1):
-		poly.append(right[i])
 	if _tex_road != null and vs.size() == left.size() and left.size() == right.size():
+		var poly := PackedVector2Array()
+		poly.append_array(left)
+		for i in range(right.size() - 1, -1, -1):
+			poly.append(right[i])
 		var uvs := PackedVector2Array()
 		for i in range(left.size()):
 			uvs.append(Vector2(0.0, vs[i]))
 		for i in range(right.size() - 1, -1, -1):
 			uvs.append(Vector2(1.0, vs[i]))
 		draw_colored_polygon(poly, Color.WHITE, uvs, _tex_road)
-	else:
-		draw_colored_polygon(poly, col_road)
+		return
+	if _theme_rainbow:
+		_fill_rainbow(left, right)
+		return
+	var flat := PackedVector2Array()
+	flat.append_array(left)
+	for i in range(right.size() - 1, -1, -1):
+		flat.append(right[i])
+	draw_colored_polygon(flat, col_road)
+
+
+# Rainbow Lane surface: longitudinal ROYGBIV stripes running down the road (à la
+# Mario Kart's Rainbow Road), built as parallel sub-bands across the width so they
+# follow the road through every bend. A slow hue scroll keyed to world-distance
+# makes the colours shimmer toward the player.
+func _fill_rainbow(left: PackedVector2Array, right: PackedVector2Array) -> void:
+	var n := left.size()
+	if n < 2 or right.size() != n:
+		return
+	var bands := 7
+	var shift := distance * 0.0012
+	for k in range(bands):
+		var f0 := float(k) / float(bands)
+		var f1 := float(k + 1) / float(bands)
+		var poly := PackedVector2Array()
+		for i in range(n):
+			poly.append(left[i].lerp(right[i], f0))
+		for i in range(n - 1, -1, -1):
+			poly.append(left[i].lerp(right[i], f1))
+		var hue := fposmod(f0 + shift, 1.0)
+		draw_colored_polygon(poly, Color.from_hsv(hue, 0.85, 1.0))
 
 
 # Centre line. Off-road / track themes paint none. Each dash is drawn as ONE
@@ -2311,7 +2588,8 @@ func _draw_dashes(centers: Array) -> void:
 	var seg := PackedVector2Array()
 	for i in range(centers.size()):
 		var p: Vector3 = centers[i]
-		if fposmod(p.z, DASH_PERIOD) < DASH_PERIOD * 0.5:
+		# leave the opening stretch unmarked so the on-road control prompts read clean
+		if p.z >= INTRO_DIST and fposmod(p.z, DASH_PERIOD) < DASH_PERIOD * 0.5:
 			seg.append(Vector2(p.x, p.y))
 		else:
 			if seg.size() >= 2:
