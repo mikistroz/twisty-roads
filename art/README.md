@@ -12,7 +12,7 @@ looks correct with or without any art present.
 
 - **`<ext>`** may be `png`, `webp`, `jpg`, `jpeg`, or `svg`.
 - **`<theme>`** is one of: `default`, `synthwave`, `track`, `rally`, `jdm`,
-  `jetski`, `sand`, `mud`, `rainbow`, `frostbite`, `wiped`.
+  `jetski`, `sand`, `mud`, `rainbow`, `frostbite`.
 - After adding files, **open the project in the Godot editor once** (or run an
   export) so they get imported — runtime loading uses the imported resources.
 

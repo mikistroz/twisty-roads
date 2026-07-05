@@ -131,6 +131,35 @@ const SHOULDER_CHANCE := 0.4      # chance a branch is a bailout shoulder instea
 const FORK_WAVE_AMP := 8.0        # max sideways wander added across a fork
 const FORK_WAVE_LEN := 820.0      # wavelength of that wander
 const FORK_WAVE_CHANCE := 0.8     # chance a fork winds rather than running straight
+const FORK_ISLAND_CHANCE := 0.22  # chance a fork is a roundabout-style island instead
+const ISLAND_MEDIAN_MULT := 2.3   # islands open a much wider grass middle...
+                                  # ...and run at the minimum fair length, so they read
+                                  # as a compact obstacle you pass around, not a long fork
+
+# ---------------- curated formations ----------------
+# Hand-authored centerline set-pieces stitched into the procedural generation at
+# random intervals: recognizable shapes (slalom gates, a smooth wave, a double
+# hairpin, a long sweeper, a chicane flick) that give the road moments of intent.
+# Each step is {dx: fraction of the formation's amplitude, len: authored segment
+# length}; the whole shape is mirrored at random and scaled by the difficulty ramp.
+const FORMATION_CHANCE := 0.28    # chance a seeded pattern uses a formation instead
+const FORMATIONS := [
+	{ "name": "slalom", "amp": 185.0, "steps": [
+		{ "dx": 1.0, "len": 185.0 }, { "dx": -1.0, "len": 185.0 }, { "dx": 1.0, "len": 185.0 },
+		{ "dx": -1.0, "len": 185.0 }, { "dx": 0.0, "len": 200.0 } ] },
+	{ "name": "wave", "amp": 240.0, "steps": [
+		{ "dx": 0.7, "len": 210.0 }, { "dx": 1.0, "len": 210.0 }, { "dx": 0.7, "len": 210.0 },
+		{ "dx": 0.0, "len": 210.0 }, { "dx": -0.7, "len": 210.0 }, { "dx": -1.0, "len": 210.0 },
+		{ "dx": -0.7, "len": 210.0 }, { "dx": 0.0, "len": 210.0 } ] },
+	{ "name": "double_hairpin", "amp": 330.0, "steps": [
+		{ "dx": 1.0, "len": 300.0 }, { "dx": 1.0, "len": 200.0 }, { "dx": -1.0, "len": 420.0 },
+		{ "dx": -1.0, "len": 200.0 }, { "dx": 0.0, "len": 320.0 } ] },
+	{ "name": "sweeper", "amp": 300.0, "steps": [
+		{ "dx": 0.55, "len": 260.0 }, { "dx": 1.0, "len": 300.0 }, { "dx": 1.0, "len": 260.0 },
+		{ "dx": 0.45, "len": 260.0 } ] },
+	{ "name": "chicane_flick", "amp": 210.0, "steps": [
+		{ "dx": 1.0, "len": 170.0 }, { "dx": -1.0, "len": 190.0 }, { "dx": -0.2, "len": 210.0 } ] },
+]
 
 # Bailout shoulder: the main road stays full width and a narrower coin lane
 # sprouts from ONE shoulder, bulges out around a grass median, then merges back —
@@ -218,23 +247,36 @@ const COL_GAP := Color("070708")          # the hole itself (reads as a void in 
 const COL_GAP_RIM := Color("f4c20d")      # hazard-striped lip on the near edge
 
 # ---------------- trail VFX ----------------
-# What the car kicks up, keyed by each theme's "vfx" name. "streak" themes lay two
-# bright tail-light ribbons from the rear corners (synthwave/jdm/wiped/rainbow); the
-# rest spray themed puffs (dust, smoke, gravel, sand, mud, water, snow). A particle
-# colour is picked per emit from "cols" (empty cols => rainbow hue cycle).
+# What the car leaves behind, keyed by each theme's "vfx" name. A vfx is either the
+# tail-light trail (two smooth red streaks drawn as fading polylines along the car's
+# actual path — synthwave) or a set of spray LAYERS: exhaust smoke puffs from the
+# centre pipe and/or terrain kicked up from the rear wheels (dust/sand/mud/snow/
+# water), so rally reads smoke+dust, frostbite smoke+snow, and the jetski a pure
+# wake splash.
+const SPRAY_SMOKE  := { "cols": ["8a8a8a", "a8a8a8", "6e6e6e"], "wheels": false, "rmin": 3.5, "rmax": 7.0, "lmin": 0.50, "lmax": 0.90 }
+const SPRAY_DUST   := { "cols": ["b8a888", "9c8c6c", "cfc0a0"], "wheels": true,  "rmin": 2.5, "rmax": 5.0, "lmin": 0.35, "lmax": 0.60 }
+const SPRAY_SAND   := { "cols": ["e0c88c", "c2a45e", "efe0b0"], "wheels": true,  "rmin": 2.5, "rmax": 5.5, "lmin": 0.35, "lmax": 0.65 }
+const SPRAY_MUD    := { "cols": ["4a3520", "5b432a", "33240f"], "wheels": true,  "rmin": 3.0, "rmax": 6.0, "lmin": 0.40, "lmax": 0.70 }
+const SPRAY_SNOW   := { "cols": ["ffffff", "e8f2fa", "cfe0ee"], "wheels": true,  "rmin": 2.5, "rmax": 5.5, "lmin": 0.50, "lmax": 0.90 }
+const SPRAY_SPLASH := { "cols": ["bfeeff", "ffffff", "7fd4ec"], "wheels": true,  "rmin": 3.0, "rmax": 6.5, "lmin": 0.30, "lmax": 0.55 }
 const VFX := {
-	"dust":      { "cols": ["b8b0a0", "9c9488", "cfc7b8"], "streak": false, "rmin": 3.0, "rmax": 6.0, "lmin": 0.40, "lmax": 0.70 },
-	"smoke":     { "cols": ["8a8a8a", "b0b0b0", "6e6e6e"], "streak": false, "rmin": 4.0, "rmax": 8.0, "lmin": 0.50, "lmax": 0.95 },
-	"gravel":    { "cols": ["7a5a36", "9c7a48", "5b432a"], "streak": false, "rmin": 2.0, "rmax": 4.5, "lmin": 0.30, "lmax": 0.55 },
-	"sand":      { "cols": ["d8c088", "c2954e", "e8d6a0"], "streak": false, "rmin": 3.0, "rmax": 6.0, "lmin": 0.40, "lmax": 0.70 },
-	"mud":       { "cols": ["4a3520", "5b432a", "33240f"], "streak": false, "rmin": 3.0, "rmax": 6.0, "lmin": 0.40, "lmax": 0.70 },
-	"splash":    { "cols": ["9be7ff", "ffffff", "5fc8e8"], "streak": false, "rmin": 3.0, "rmax": 6.0, "lmin": 0.35, "lmax": 0.60 },
-	"snow":      { "cols": ["ffffff", "dfe9f0", "cfe0ee"], "streak": false, "rmin": 3.0, "rmax": 6.0, "lmin": 0.55, "lmax": 0.95 },
-	"neon":      { "cols": ["ff2e97", "00f0ff"],           "streak": true,  "rmin": 3.0, "rmax": 5.0, "lmin": 0.35, "lmax": 0.60 },
-	"underglow": { "cols": ["f72585", "4cc9f0"],           "streak": true,  "rmin": 3.0, "rmax": 5.0, "lmin": 0.35, "lmax": 0.60 },
-	"energy":    { "cols": ["39c0ff", "8affff"],           "streak": true,  "rmin": 3.0, "rmax": 5.0, "lmin": 0.35, "lmax": 0.60 },
-	"rainbow":   { "cols": [],                             "streak": true,  "rmin": 3.0, "rmax": 5.0, "lmin": 0.40, "lmax": 0.70 },
+	"smoke":      { "layers": [SPRAY_SMOKE] },
+	"smoke_dust": { "layers": [SPRAY_SMOKE, SPRAY_DUST] },
+	"smoke_sand": { "layers": [SPRAY_SMOKE, SPRAY_SAND] },
+	"smoke_mud":  { "layers": [SPRAY_SMOKE, SPRAY_MUD] },
+	"smoke_snow": { "layers": [SPRAY_SMOKE, SPRAY_SNOW] },
+	"splash":     { "layers": [SPRAY_SPLASH] },
+	"taillight":  { "layers": [] },
 }
+const COL_TAILLIGHT := Color("ff2433")   # the smooth red streak colour
+const TAILLIGHT_LEN := 240.0             # how far back (world px) the streaks reach
+const TAILLIGHT_MAX_PTS := 72            # history cap (samples are per-frame)
+
+# ---------------- object shadows ----------------
+# Soft offset drop shadows under everything that sits ON the road/terrain, so
+# objects stay readable on flat or busy surfaces (rainbow especially).
+const SHADOW_COL := Color(0.0, 0.0, 0.0, 0.20)
+const SHADOW_OFF := Vector2(5.0, 7.0)
 
 # ---------------- crash ----------------
 const CRASH_TIME := 1.0
@@ -285,39 +327,96 @@ const FONT_EXTS := ["ttf", "otf"]
 # "vehicle"/"enemy" name the vehicles, "vfx" names the effect set, "stripes" says
 # whether the road carries a painted centre line (off-road / track surfaces don't)
 # — these are the slots the art pipeline keys off (e.g. res://art/<id>/car.png).
-const THEME_ORDER := ["default", "synthwave", "track", "rally", "jdm", "jetski", "sand", "mud", "rainbow", "frostbite", "wiped"]
+const THEME_ORDER := ["default", "synthwave", "track", "rally", "jdm", "jetski", "sand", "mud", "rainbow", "frostbite"]
 const THEMES := {
-	"default":   { "name": "Standard",     "price": 0,    "offroad": "2e5d34", "road": "3c4146", "edge": "e8e8e8", "dash": "f2c14e", "stripes": true,  "car": "1f6fd0", "car_dark": "0d4a99", "vehicle": "BMW E46",          "enemy": "Toyota RAV4",       "vfx": "dust" },
-	"synthwave": { "name": "Synthwave",    "price": 300,  "offroad": "1a0b2e", "road": "241341", "edge": "ff2e97", "dash": "00f0ff", "stripes": true,  "car": "ffd319", "car_dark": "ff5f1f", "vehicle": "Lamborghini Countach", "enemy": "Sports coupes", "vfx": "neon" },
+	"default":   { "name": "Standard",     "price": 0,    "offroad": "2e5d34", "road": "3c4146", "edge": "e8e8e8", "dash": "f2c14e", "stripes": true,  "car": "1f6fd0", "car_dark": "0d4a99", "vehicle": "BMW E46",          "enemy": "Toyota RAV4",       "vfx": "smoke" },
+	"synthwave": { "name": "Synthwave",    "price": 300,  "offroad": "1a0b2e", "road": "241341", "edge": "ff2e97", "dash": "00f0ff", "stripes": true,  "car": "ffd319", "car_dark": "ff5f1f", "vehicle": "Lamborghini Countach", "enemy": "Sports coupes", "vfx": "taillight" },
 	"track":     { "name": "Track Attack", "price": 400,  "offroad": "2e7d32", "road": "3a3a3a", "edge": "e03131", "dash": "ffffff", "stripes": false, "car": "e10600", "car_dark": "8a0400", "vehicle": "Open-wheel racer", "enemy": "Open-wheel racers", "vfx": "smoke" },
-	"rally":     { "name": "Rally Rush",   "price": 500,  "offroad": "234a25", "road": "6b4f2a", "edge": "caa15a", "dash": "ffffff", "stripes": false, "car": "1565c0", "car_dark": "0d47a1", "vehicle": "Subaru Impreza",   "enemy": "Mitsubishi Lancer", "vfx": "gravel" },
-	"jdm":       { "name": "JDM",          "price": 600,  "offroad": "0d1b2a", "road": "23272e", "edge": "f72585", "dash": "4cc9f0", "stripes": true,  "car": "e6552a", "car_dark": "a83419", "vehicle": "Toyota Supra",     "enemy": "Mazda Miata",       "vfx": "underglow" },
+	"rally":     { "name": "Rally Rush",   "price": 500,  "offroad": "234a25", "road": "6b4f2a", "edge": "caa15a", "dash": "ffffff", "stripes": false, "car": "1565c0", "car_dark": "0d47a1", "vehicle": "Subaru Impreza",   "enemy": "Mitsubishi Lancer", "vfx": "smoke_dust" },
+	"jdm":       { "name": "JDM",          "price": 600,  "offroad": "0d1b2a", "road": "23272e", "edge": "f72585", "dash": "4cc9f0", "stripes": true,  "car": "e6552a", "car_dark": "a83419", "vehicle": "Toyota Supra",     "enemy": "Mazda Miata",       "vfx": "smoke" },
 	"jetski":    { "name": "Jetski Escape","price": 700,  "offroad": "e3c98f", "road": "1f7a8c", "edge": "9be7ff", "dash": "ffffff", "stripes": false, "car": "ff5252", "car_dark": "b71c1c", "vehicle": "Jetski",          "enemy": "Jetskis",           "vfx": "splash" },
-	"sand":      { "name": "Sand Rally",   "price": 800,  "offroad": "c2954e", "road": "9c7a3c", "edge": "e8d6a0", "dash": "ffffff", "stripes": false, "car": "2e7d32", "car_dark": "1b5e20", "vehicle": "Rally buggy",      "enemy": "Porsche Safari",    "vfx": "sand" },
-	"mud":       { "name": "Mud Sprint",   "price": 900,  "offroad": "3b5323", "road": "5b432a", "edge": "8a6d3b", "dash": "ffffff", "stripes": false, "car": "d32f2f", "car_dark": "9a1f1f", "vehicle": "Enduro bike",      "enemy": "Enduro bikes",      "vfx": "mud" },
-	"rainbow":   { "name": "Rainbow Lane", "price": 1000, "offroad": "0b0b2a", "road": "3a2f5e", "edge": "ff5ec7", "dash": "ffffff", "stripes": true,  "car": "ffeb3b", "car_dark": "fbc02d", "vehicle": "Kart",            "enemy": "Karts",             "vfx": "rainbow" },
-	"frostbite": { "name": "Frostbite Run","price": 1200, "offroad": "dfe9f0", "road": "8fa8bf", "edge": "5b86b0", "dash": "ffffff", "stripes": false, "car": "455a64", "car_dark": "263238", "vehicle": "Ford F-150",      "enemy": "Porsche Cayenne",   "vfx": "snow" },
-	"wiped":     { "name": "Wiped Out",    "price": 1500, "offroad": "0a1226", "road": "13294b", "edge": "39c0ff", "dash": "8affff", "stripes": true,  "car": "00e5ff", "car_dark": "0091a7", "vehicle": "Hover racer",      "enemy": "Hover racers",      "vfx": "energy" },
+	"sand":      { "name": "Sand Rally",   "price": 800,  "offroad": "c2954e", "road": "9c7a3c", "edge": "e8d6a0", "dash": "ffffff", "stripes": false, "car": "2e7d32", "car_dark": "1b5e20", "vehicle": "Rally buggy",      "enemy": "Porsche Safari",    "vfx": "smoke_sand" },
+	"mud":       { "name": "Mud Sprint",   "price": 900,  "offroad": "3b5323", "road": "5b432a", "edge": "8a6d3b", "dash": "ffffff", "stripes": false, "car": "d32f2f", "car_dark": "9a1f1f", "vehicle": "Enduro bike",      "enemy": "Enduro bikes",      "vfx": "smoke_mud" },
+	"rainbow":   { "name": "Rainbow Lane", "price": 1000, "offroad": "0b0b2a", "road": "3a2f5e", "edge": "ff5ec7", "dash": "ffffff", "stripes": true,  "car": "ffeb3b", "car_dark": "fbc02d", "vehicle": "Kart",            "enemy": "Karts",             "vfx": "smoke" },
+	"frostbite": { "name": "Frostbite Run","price": 1200, "offroad": "dfe9f0", "road": "8fa8bf", "edge": "5b86b0", "dash": "ffffff", "stripes": false, "car": "455a64", "car_dark": "263238", "vehicle": "Ford F-150",      "enemy": "Porsche Cayenne",   "vfx": "smoke_snow" },
 }
+# Themes removed from the store. Anyone who had bought one gets its price refunded
+# on load, so no coins are ever lost to a retired theme.
+const REMOVED_THEMES := { "wiped": 1500 }
 
 # ---------------- challenges ----------------
 const DEFAULT_STATS := {
 	"total_time": 0.0, "total_distance": 0.0, "total_runs": 0,
 	"best_run_time": 0.0, "best_distance": 0.0, "best_streak": 0,
 	"best_no_coin_time": 0.0, "runs_over_2min": 0,
+	"total_boost_time": 0.0, "total_coins": 0, "total_near_miss": 0, "total_smashed": 0,
+	# one-time achievement flags (0/1), set the moment their condition is met
+	"ach_grounded": 0, "ach_safe": 0, "ach_oily": 0, "ach_quick_end": 0,
+	"ach_forks": 0, "ach_rampage": 0, "ach_collector": 0, "ach_saver": 0,
 }
-const CHALLENGES := [
-	{ "id": "first",    "desc": "Finish your first run",        "stat": "total_runs",        "goal": 1,      "reward": 20 },
-	{ "id": "reg",      "desc": "Complete 25 runs",             "stat": "total_runs",        "goal": 25,     "reward": 150 },
-	{ "id": "two_min",  "desc": "Survive 2 minutes in a run",   "stat": "best_run_time",     "goal": 120,    "reward": 100 },
-	{ "id": "five_2m",  "desc": "Complete 5 runs over 2 min",   "stat": "runs_over_2min",    "goal": 5,      "reward": 200 },
-	{ "id": "halfhour", "desc": "Drive 30 minutes total",       "stat": "total_time",        "goal": 1800,   "reward": 150 },
-	{ "id": "far",      "desc": "Reach 5 km in one run",        "stat": "best_distance",     "goal": 40000,  "reward": 60 },
-	{ "id": "farther",  "desc": "Reach 12 km in one run",       "stat": "best_distance",     "goal": 96000,  "reward": 160 },
-	{ "id": "total10k", "desc": "Drive 100 km total",           "stat": "total_distance",    "goal": 800000, "reward": 200 },
-	{ "id": "streak10", "desc": "Collect 10 coins in a row",    "stat": "best_streak",       "goal": 10,     "reward": 80 },
-	{ "id": "ascetic",  "desc": "Drive 30s without a coin",     "stat": "best_no_coin_time", "goal": 30,     "reward": 90 },
+# Challenge ladders: five escalating stages per tracked statistic. Each stage is
+# [goal, coin reward]; the challenge list itself is generated in _make_challenges
+# (id = "<family>_<stage>", description formatted from the goal via _fmt_goal).
+const CHALLENGE_LADDERS := [
+	{ "id": "runs",  "stat": "total_runs",       "desc": "Complete %s runs",               "fmt": "int",  "stages": [[1, 20, "Finish your first run"], [10, 60], [25, 150], [60, 300], [150, 600]] },
+	{ "id": "surv",  "stat": "best_run_time",    "desc": "Survive %s in a run",            "fmt": "time", "stages": [[60, 50], [120, 100], [180, 160], [300, 300], [480, 600]] },
+	{ "id": "over2", "stat": "runs_over_2min",   "desc": "Finish %s runs over 2 minutes",  "fmt": "int",  "stages": [[1, 40, "Finish a run over 2 minutes"], [5, 120], [15, 250], [30, 450], [60, 800]] },
+	{ "id": "ttime", "stat": "total_time",       "desc": "Drive %s in total",              "fmt": "time", "stages": [[900, 50], [2700, 120], [7200, 250], [18000, 450], [54000, 900]] },
+	{ "id": "tdist", "stat": "total_distance",   "desc": "Drive %s km in total",           "fmt": "km",   "stages": [[200000, 60], [800000, 150], [2000000, 300], [4800000, 600], [12000000, 1200]] },
+	{ "id": "rdist", "stat": "best_distance",    "desc": "Reach %s km in one run",         "fmt": "km",   "stages": [[16000, 30], [40000, 60], [96000, 160], [160000, 320], [280000, 700]] },
+	{ "id": "boost", "stat": "total_boost_time", "desc": "Stay boosted for %s in total",   "fmt": "time", "stages": [[30, 40], [120, 100], [300, 220], [900, 450], [2400, 900]] },
+	{ "id": "coins", "stat": "total_coins",      "desc": "Collect %s coins in total",      "fmt": "int",  "stages": [[100, 30], [500, 80], [2000, 200], [8000, 450], [25000, 1000]] },
+	{ "id": "nmiss", "stat": "total_near_miss",  "desc": "Score %s near misses",           "fmt": "int",  "stages": [[10, 30], [50, 80], [200, 200], [800, 500], [2500, 1000]] },
+	{ "id": "smash", "stat": "total_smashed",    "desc": "Destroy %s obstacles",           "fmt": "int",  "stages": [[5, 40], [25, 100], [100, 250], [400, 600], [1200, 1200]] },
 ]
+# One-time feats layered on top of the ladders.
+const CHALLENGE_SPECIALS := [
+	{ "id": "ascetic",     "desc": "Drive 30 s without collecting a coin",                 "stat": "best_no_coin_time", "goal": 30, "reward": 90 },
+	{ "id": "grounded",    "desc": "Drive 3 km in a run without taking an optional ramp",  "stat": "ach_grounded",      "goal": 1,  "reward": 150 },
+	{ "id": "untouchable", "desc": "Drive 2 km in a run with zero near misses",            "stat": "ach_safe",          "goal": 1,  "reward": 120 },
+	{ "id": "slippery",    "desc": "Hit 3 oil slicks in one run",                          "stat": "ach_oily",          "goal": 1,  "reward": 100 },
+	{ "id": "any_percent", "desc": "Crash within 3 seconds of setting off",                "stat": "ach_quick_end",     "goal": 1,  "reward": 30 },
+	{ "id": "fork_vet",    "desc": "Pass 5 road splits in one run",                        "stat": "ach_forks",         "goal": 1,  "reward": 150 },
+	{ "id": "rampage",     "desc": "Smash 3 obstacles during a single boost",              "stat": "ach_rampage",       "goal": 1,  "reward": 200 },
+	{ "id": "collector",   "desc": "Own 3 paint themes",                                   "stat": "ach_collector",     "goal": 1,  "reward": 150 },
+	{ "id": "saver",       "desc": "Hold 1500 coins at once",                              "stat": "ach_saver",         "goal": 1,  "reward": 200 },
+]
+var CHALLENGES: Array[Dictionary] = _make_challenges()
+
+
+static func _make_challenges() -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	for fam in CHALLENGE_LADDERS:
+		var stages: Array = fam["stages"]
+		for si in range(stages.size()):
+			var st: Array = stages[si]
+			var goal := float(st[0])
+			# a stage may carry its own wording as a third entry (e.g. the goal-1
+			# stages, where "Complete 1 runs" would read wrong)
+			var desc := String(st[2]) if st.size() > 2 else String(fam["desc"]) % _fmt_goal(goal, String(fam["fmt"]))
+			out.append({
+				"id": "%s_%d" % [fam["id"], si + 1],
+				"desc": desc,
+				"stat": fam["stat"], "goal": goal, "reward": int(st[1]),
+			})
+	for sp in CHALLENGE_SPECIALS:
+		out.append(sp)
+	return out
+
+
+# Pretty goal for a challenge description: km from world px, seconds into
+# s / min / h at natural breakpoints, else a plain count.
+static func _fmt_goal(goal: float, fmt: String) -> String:
+	match fmt:
+		"km":
+			return str(int(roundf(goal / (PX_PER_METER * 1000.0))))
+		"time":
+			if goal >= 3600.0:
+				return "%d h" % int(goal / 3600.0)
+			if goal >= 120.0:
+				return "%d min" % int(goal / 60.0)
+			return "%d s" % int(goal)
+	return str(int(goal))
 
 enum State { MENU, STORE, CHALLENGES, PLAYING, PAUSED, COUNTDOWN, CRASH, GAME_OVER }
 
@@ -342,6 +441,19 @@ var _streak_best := 0
 var _no_coin_timer := 0.0
 var _no_coin_best := 0.0
 
+# Per-run tallies for the challenge/achievement system, committed into the
+# persistent stats in _game_over (so abandoning a run mid-way commits nothing,
+# same as the time/distance stats).
+var _run_near_miss := 0
+var _run_smashed := 0
+var _run_boost_time := 0.0
+var _run_oil := 0
+var _run_forks := 0
+var _run_opt_jumps := 0            # optional ramps taken (gap-escape ramps excluded)
+var _boost_chain := 0              # obstacles smashed during the CURRENT boost
+var _boost_chain_best := 0
+var _was_in_branch := false        # edge detector for counting traversed splits
+
 var col_offroad: Color
 var col_road: Color
 var col_edge: Color
@@ -351,7 +463,7 @@ var col_car_dark: Color
 var col_deco: Color                # tint for primitive background props
 var _theme_stripes := true         # does the current theme paint a centre line?
 var _theme_rainbow := false        # Rainbow Lane paints the road surface itself as a rainbow
-var _theme_vfx := "dust"           # which trail effect the car kicks up (see VFX / _emit_trail)
+var _theme_vfx := "smoke"          # which trail effect the car leaves (see VFX / _emit_trail)
 
 # Convention-loaded theme art (null = use the primitive fallback). Mirrors audio.
 var _tex_road: Texture2D
@@ -361,6 +473,8 @@ var _tex_enemy: Array[Texture2D] = []
 var _tex_deco: Array[Texture2D] = []
 # Built once, theme-independent: the Rainbow Lane stripe palette (see _fill_rainbow).
 var _tex_rainbow: ImageTexture
+# Cached triangle-strip index buffer for the road-band renderer (see _strip_indices).
+var _strip_idx := PackedInt32Array()
 
 # Live collision half-extents. Default to the canonical footprint; once a sprite is
 # loaded they shrink to its opaque content so collisions ignore transparent pixels
@@ -399,6 +513,9 @@ var _tire_marks: Array = []
 var _particles: Array = []
 var _boom: Array = []
 var _exhaust_accum := 0.0
+# Tail-light streak history: one sample per frame of (left-lamp wx, right-lamp wx,
+# wd). Drawn as two fading polylines along the car's real path (see _draw_taillights).
+var _taillights: Array[Vector3] = []
 var _oil_timer := 0.0
 var _air_timer := 0.0
 var _boost_timer := 0.0
@@ -513,6 +630,10 @@ func _load_save() -> void:
 		for k in cfg.get_value("data", "owned", ["default"]):
 			if THEMES.has(k):
 				owned[k] = true
+			elif REMOVED_THEMES.has(k):
+				# retired theme: give the purchase price back (idempotent — the theme
+				# is dropped from owned, so the next save stops this repeating)
+				coins_total += int(REMOVED_THEMES[k])
 		if not THEMES.has(selected) or not owned.has(selected):
 			selected = "default"
 		var s = cfg.get_value("data", "stats", {})
@@ -544,7 +665,7 @@ func _apply_theme(id: String) -> void:
 	col_car = Color(t["car"])
 	col_car_dark = Color(t["car_dark"])
 	_theme_rainbow = id == "rainbow"
-	_theme_vfx = String(t.get("vfx", "dust"))
+	_theme_vfx = String(t.get("vfx", "smoke"))
 	# Rainbow Lane is the road itself (a rainbow surface), so it paints no centre line
 	_theme_stripes = bool(t.get("stripes", true)) and not _theme_rainbow
 	# primitive prop tint: keep it readable whatever the ground colour is
@@ -759,12 +880,26 @@ func _build_ui() -> void:
 
 	_challenges = _make_panel(layer)
 	_make_label(_challenges, "CHALLENGES", Vector2(0, 50), Vector2(SCREEN_W, 80), 56)
-	var cy := 160.0
+	# the list far outgrows the screen now (10 five-stage ladders + the one-time
+	# feats), so it lives in a ScrollContainer instead of fixed label rows
+	var sc := ScrollContainer.new()
+	sc.position = Vector2(40, 150)
+	sc.size = Vector2(SCREEN_W - 80, 910)
+	sc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_challenges.add_child(sc)
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 16)
+	sc.add_child(vb)
 	for i in range(CHALLENGES.size()):
-		var lbl := _make_label(_challenges, "", Vector2(40, cy), Vector2(SCREEN_W - 80, 84), 24)
-		lbl.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+		var lbl := Label.new()
+		lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		lbl.custom_minimum_size = Vector2(SCREEN_W - 120, 74)
+		lbl.add_theme_font_size_override("font_size", 24)
+		if _ui_font != null:
+			lbl.add_theme_font_override("font", _ui_font)
+		lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		vb.add_child(lbl)
 		_challenge_labels.append(lbl)
-		cy += 92.0
 	_make_button(_challenges, "BACK", Vector2(180, 1090), Vector2(360, 90), 40).pressed.connect(_goto_menu)
 
 	_hud = _make_panel(layer)
@@ -858,6 +993,16 @@ func _reset_world() -> void:
 	_particles.clear()
 	_boom.clear()
 	_popups.clear()
+	_taillights.clear()
+	_run_near_miss = 0
+	_run_smashed = 0
+	_run_boost_time = 0.0
+	_run_oil = 0
+	_run_forks = 0
+	_run_opt_jumps = 0
+	_boost_chain = 0
+	_boost_chain_best = 0
+	_was_in_branch = false
 	_pattern_queue.clear()
 	_coin_frontier_d = 0.0
 	_hazard_frontier_d = 0.0
@@ -961,7 +1106,28 @@ func _game_over() -> void:
 	stats["best_no_coin_time"] = maxf(float(stats["best_no_coin_time"]), maxf(_no_coin_best, _no_coin_timer))
 	if time_alive >= 120.0:
 		stats["runs_over_2min"] = int(stats["runs_over_2min"]) + 1
+	stats["total_boost_time"] = float(stats["total_boost_time"]) + _run_boost_time
+	stats["total_coins"] = int(stats["total_coins"]) + session_coins
+	stats["total_near_miss"] = int(stats["total_near_miss"]) + _run_near_miss
+	stats["total_smashed"] = int(stats["total_smashed"]) + _run_smashed
+	# one-time feats earned this run
+	if distance >= 24000.0 and _run_opt_jumps == 0:
+		stats["ach_grounded"] = 1
+	if distance >= 16000.0 and _run_near_miss == 0:
+		stats["ach_safe"] = 1
+	if _run_oil >= 3:
+		stats["ach_oily"] = 1
+	if time_alive < 3.0:
+		stats["ach_quick_end"] = 1
+	if _run_forks >= 5:
+		stats["ach_forks"] = 1
+	if _boost_chain_best >= 3:
+		stats["ach_rampage"] = 1
+	if owned.size() >= 3:
+		stats["ach_collector"] = 1
 	coins_total += session_coins
+	if coins_total >= 1500:
+		stats["ach_saver"] = 1
 	var newly := _evaluate_challenges()
 	_save()
 	_go_score.text = "Distance: %.2f KM" % _dist_km()
@@ -991,6 +1157,10 @@ func _on_theme_pressed(id: String) -> void:
 			owned[id] = true
 			selected = id
 			_apply_theme(id)
+			if owned.size() >= 3:
+				stats["ach_collector"] = 1
+			if not _evaluate_challenges().is_empty():
+				_play_sfx(_sfx_challenge)
 			_save()
 			_play_sfx(_sfx_purchase)
 	_refresh_store()
@@ -1119,6 +1289,12 @@ func _update_play(delta: float) -> void:
 	_ensure_decos(distance + _gen_ahead)
 	_drop_old()
 
+	# count each fork/shoulder the car makes it through (rear edge crossed alive)
+	var in_branch_now := _in_branch(distance)
+	if _was_in_branch and not in_branch_now:
+		_run_forks += 1
+	_was_in_branch = in_branch_now
+
 	# camera follows the car (with a little look-ahead toward the upcoming road)
 	var look := _nearest_lane_center(distance + CAM_LOOKAHEAD, car_x)
 	var cam_target := lerpf(car_x, look, CAM_LOOK_W)
@@ -1129,6 +1305,7 @@ func _update_play(delta: float) -> void:
 	if _oil_timer > 0.0:
 		_oil_timer -= delta
 	if _boost_timer > 0.0:
+		_run_boost_time += delta
 		_boost_timer -= delta
 		# cue the player that boost (and its smash-through power) is about to lapse
 		if not _boost_warned and _boost_timer > 0.0 and _boost_timer < BOOST_WARN:
@@ -1143,6 +1320,7 @@ func _update_play(delta: float) -> void:
 			session_coins += JUMP_COINS
 			_boost_timer = BOOST_TIME
 			_boost_warned = false
+			_boost_chain = 0   # a fresh boost starts a fresh smash chain (rampage feat)
 			_add_popup(_sx(car_x), _car_y - 30.0, "+%d" % JUMP_COINS, true)
 			_play_sfx(_sfx_land)
 
@@ -1409,6 +1587,9 @@ func _spawn_jump_gap(d: float) -> float:
 func _smash_hazard(h: Dictionary) -> void:
 	h["dead"] = true
 	session_coins += RAM_COINS
+	_run_smashed += 1
+	_boost_chain += 1
+	_boost_chain_best = maxi(_boost_chain_best, _boost_chain)
 	# explosion is anchored to the WORLD point it happened at, so it stays on the
 	# road as the camera scrolls past instead of sliding across the screen
 	_spawn_explosion(float(h["x"]), float(h["d"]))
@@ -1463,6 +1644,7 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 			if not ramming and not h["scored"] and dy < _pl_hh + BLOCK_H * 0.5 + 20.0 and dx < NEAR_MISS_DX:
 				h["scored"] = true
 				session_coins += NEAR_MISS_COINS
+				_run_near_miss += 1
 				_add_popup(_sx(car_x), _car_y - 60.0, "Near Miss! +%d" % NEAR_MISS_COINS, true, 220.0, true)
 				_play_sfx(_sfx_near_miss)
 		elif htype == "traffic":
@@ -1480,6 +1662,7 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 			if not ramming and not h["scored"] and dy < _pl_hh + 20.0 and dx < NEAR_MISS_DX:
 				h["scored"] = true
 				session_coins += NEAR_MISS_COINS
+				_run_near_miss += 1
 				_add_popup(_sx(car_x), _car_y - 60.0, "Near Miss! +%d" % NEAR_MISS_COINS, true, 220.0, true)
 				_play_sfx(_sfx_near_miss)
 			# random oncoming horn while the car is on screen ahead/behind
@@ -1492,6 +1675,7 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 			if not h["hit"] and dy < OIL_R and dx < OIL_R:
 				h["hit"] = true
 				_oil_timer = OIL_TIME
+				_run_oil += 1
 				_play_sfx(_sfx_oil)
 		elif htype == "jump":
 			var jw: float = float(h.get("w", JUMP_W))
@@ -1499,6 +1683,8 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 			if not h["hit"] and dy < _pl_hh + jh * 0.5 and dx < _pl_hw + jw * 0.5:
 				h["hit"] = true
 				_air_timer = AIR_TIME
+				if not bool(h.get("gap_ramp", false)):
+					_run_opt_jumps += 1   # gap-escape ramps are forced; only these count against "grounded"
 				_play_sfx(_sfx_jump)
 		elif htype == "gap":
 			# a hole across the whole road: sail over it airborne, or fall in
@@ -1520,41 +1706,72 @@ func _boom_screen(e: Dictionary) -> Vector2:
 	return base + Vector2(e["off"])
 
 
-# Per-theme trail behind the car. Streak themes lay two bright tail-light ribbons
-# from the rear corners; spray themes puff themed debris out behind. Shape/colour
-# come from the active theme's VFX entry (see VFX).
+# Per-theme trail behind the car. The tail-light vfx records the rear lamps' world
+# positions each frame (drawn later as two smooth fading streaks along the car's
+# actual path); spray vfx emit their layers — exhaust smoke from the centre pipe,
+# terrain kick from alternating rear wheels — as themed puffs.
 func _emit_trail(delta: float) -> void:
-	var fx: Dictionary = VFX.get(_theme_vfx, VFX["dust"])
-	var streak := bool(fx["streak"])
-	var interval := 0.025 if streak else 0.04   # denser for streaks so the ribbon reads continuous
+	if _theme_vfx == "taillight":
+		var rear := distance - CAR_HALF_H * 0.9
+		_taillights.append(Vector3(car_x - CAR_HALF_W * 0.6, car_x + CAR_HALF_W * 0.6, rear))
+		while _taillights.size() > TAILLIGHT_MAX_PTS or (_taillights.size() > 0 and _taillights[0].z < distance - TAILLIGHT_LEN):
+			_taillights.remove_at(0)
+		return
+	var fx: Dictionary = VFX.get(_theme_vfx, VFX["smoke"])
 	_exhaust_accum += delta
-	while _exhaust_accum > interval:
-		_exhaust_accum -= interval
-		var life := randf_range(float(fx["lmin"]), float(fx["lmax"]))
-		var r := randf_range(float(fx["rmin"]), float(fx["rmax"]))
-		if streak:
-			# two ribbons straight back from the rear corners
-			for sgn in [-1.0, 1.0]:
-				_particles.append({
-					"wx": car_x + sgn * CAR_HALF_W * 0.55, "wd": distance - CAR_HALF_H * 0.85,
-					"off": Vector2.ZERO, "vel": Vector2(randf_range(-4.0, 4.0), randf_range(70.0, 110.0)),
-					"age": 0.0, "life": life, "r": r, "col": _vfx_color(fx), "streak": true,
-				})
-		else:
+	while _exhaust_accum > 0.04:
+		_exhaust_accum -= 0.04
+		for layer in fx["layers"]:
+			var life := randf_range(float(layer["lmin"]), float(layer["lmax"]))
+			var r := randf_range(float(layer["rmin"]), float(layer["rmax"]))
+			var cols: Array = layer["cols"]
+			var wx := car_x + randf_range(-6.0, 6.0)
+			var vel := Vector2(randf_range(-14.0, 14.0), randf_range(36.0, 70.0))
+			if bool(layer["wheels"]):
+				# terrain kick: from one rear wheel, flung slightly outward
+				var side := -1.0 if randf() < 0.5 else 1.0
+				wx = car_x + side * CAR_HALF_W * 0.7
+				vel = Vector2(side * randf_range(8.0, 34.0), randf_range(50.0, 90.0))
 			_particles.append({
-				"wx": car_x + randf_range(-6.0, 6.0), "wd": distance - CAR_HALF_H * 0.7,
-				"off": Vector2.ZERO, "vel": Vector2(randf_range(-14.0, 14.0), randf_range(36.0, 70.0)),
-				"age": 0.0, "life": life, "r": r, "col": _vfx_color(fx), "streak": false,
+				"wx": wx, "wd": distance - CAR_HALF_H * 0.75,
+				"off": Vector2.ZERO, "vel": vel,
+				"age": 0.0, "life": life, "r": r, "col": Color(cols[randi() % cols.size()]),
 			})
 
 
-# A particle colour for this VFX: random from its palette, or a cycling rainbow hue
-# when the palette is empty (Rainbow Lane).
-func _vfx_color(fx: Dictionary) -> Color:
-	var cols: Array = fx["cols"]
-	if cols.is_empty():
-		return Color.from_hsv(fposmod(time_alive * 0.6 + randf() * 0.1, 1.0), 0.9, 1.0)
-	return Color(cols[randi() % cols.size()])
+# The synthwave tail-lights: the recorded lamp path drawn as two polylines whose
+# alpha fades toward the tail — smooth continuous red streaks that curve with the
+# car's real steering, not a chain of particles.
+func _draw_taillights() -> void:
+	var n := _taillights.size()
+	if n < 2:
+		return
+	var lpts := PackedVector2Array()
+	var rpts := PackedVector2Array()
+	var cols := PackedColorArray()
+	lpts.resize(n)
+	rpts.resize(n)
+	cols.resize(n)
+	for i in range(n):
+		var s: Vector3 = _taillights[i]
+		var y := _car_y - (s.z - distance)
+		lpts[i] = Vector2(_sx(s.x), y)
+		rpts[i] = Vector2(_sx(s.y), y)
+		var f := float(i) / float(n - 1)   # 0 = oldest (tail) -> 1 = newest (at the car)
+		var c := COL_TAILLIGHT
+		c.a = f * f * 0.85
+		cols[i] = c
+	# a wide faint pass under a narrow bright one reads as a neon glow
+	var glow := PackedColorArray()
+	glow.resize(n)
+	for i in range(n):
+		var g := cols[i]
+		g.a *= 0.35
+		glow[i] = g
+	draw_polyline_colors(lpts, glow, 10.0, true)
+	draw_polyline_colors(rpts, glow, 10.0, true)
+	draw_polyline_colors(lpts, cols, 4.0, true)
+	draw_polyline_colors(rpts, cols, 4.0, true)
 
 
 func _update_particles(delta: float) -> void:
@@ -1702,8 +1919,22 @@ func _force_turn() -> void:
 	_pattern_queue.append({ "x": _track_last_x + dir * amp * 0.35 })
 
 
+# Queue one curated formation: the recipe's authored shape, mirrored at random and
+# amplitude-scaled by the difficulty ramp, laid out relative to the current road x.
+func _queue_formation() -> void:
+	var f: Dictionary = FORMATIONS[randi() % FORMATIONS.size()]
+	var base := _track_last_x
+	var dir := -1.0 if randf() < 0.5 else 1.0
+	var amp := float(f["amp"]) * lerpf(0.65, 1.0, _turn_factor())
+	for st in f["steps"]:
+		_pattern_queue.append({ "x": base + dir * amp * float(st["dx"]), "len": float(st["len"]) })
+
+
 func _maybe_seed_pattern() -> void:
 	if randf() < 0.32:
+		return
+	if randf() < FORMATION_CHANCE:
+		_queue_formation()
 		return
 	var base := _track_last_x
 	var amp_scale := lerpf(0.6, 1.0, _turn_factor())
@@ -1750,6 +1981,7 @@ func _ensure_track(up_to: float) -> void:
 			else:
 				_maybe_seed_pattern()
 
+		var step_len := -1.0   # >0 = a curated formation step with authored pacing
 		if _pattern_queue.is_empty():
 			# drift gives the road momentum so it travels somewhere
 			_bias = clampf(_bias * 0.92 + randf_range(-30.0, 30.0), -150.0, 150.0)
@@ -1761,14 +1993,21 @@ func _ensure_track(up_to: float) -> void:
 		else:
 			var mv: Dictionary = _pattern_queue.pop_front()
 			target = float(mv["x"])
+			step_len = float(mv.get("len", -1.0))
 
 		# slope cap: make the segment long enough that the turn isn't pinched
-		# and you have time to steer into it
+		# and you have time to steer into it. A formation step keeps its authored
+		# pacing (no length jitter, so the shape stays crisp) but never beats the
+		# slope cap — fairness first.
 		var move := absf(target - _track_last_x)
-		var seg_len := maxf(lerpf(220.0, 150.0, tf), move / _slope_cap())
+		var seg_len: float
+		if step_len > 0.0:
+			seg_len = maxf(step_len, move / _slope_cap())
+		else:
+			seg_len = maxf(lerpf(220.0, 150.0, tf), move / _slope_cap()) * randf_range(0.95, 1.1)
 		# track how far the road has run nearly straight, so we can force a bend
 		_straight_run = 0.0 if move > 95.0 else _straight_run + seg_len
-		_push_point(seg_len * randf_range(0.95, 1.1), target)
+		_push_point(seg_len, target)
 
 
 func road_center(d: float) -> float:
@@ -1985,10 +2224,14 @@ func _ensure_branches(up_to: float) -> void:
 # its length is stretched past the sweep-cap minimum by a random factor — so no
 # two forks peel apart the same way or for the same distance.
 func _make_fork(d0: float, rhw: float) -> Dictionary:
-	var asym := randf() < FORK_ASYM_CHANCE
+	# island variant: a roundabout-style split — mirror-symmetric, a much wider
+	# grass middle, run at the minimum fair length, and no wander — so it reads as
+	# a compact central island you pass on either side rather than a long fork
+	var island := randf() < FORK_ISLAND_CHANCE
+	var asym := (not island) and randf() < FORK_ASYM_CHANCE
 	var hw_cap := minf(rhw - 6.0, LANE_HW_MAX)   # cap width so wide roads still make short forks
 	var base_hw := clampf(rhw * LANE_FRAC, LANE_HW_MIN, hw_cap)
-	var base_med := rhw * FORK_MEDIAN_FRAC
+	var base_med := rhw * FORK_MEDIAN_FRAC * (ISLAND_MEDIAN_MULT if island else 1.0)
 	# per-lane jitter (a symmetric fork keeps both sides equal; a lopsided one does
 	# not). Each lane's separation is its own width PLUS a jittered median, so the
 	# grass gap between the lanes is always positive however the sides are jittered.
@@ -2007,16 +2250,16 @@ func _make_fork(d0: float, rhw: float) -> Dictionary:
 	var max_off := maxf(off_l, off_r)
 	var min_ramp := clampf(minf(ramp_l, ramp_r), 0.05, 0.5)
 	var min_len := maxf(FORK_LEN_MIN, max_off * 1.5 * MAX_SPEED * BOOST_MULT / (min_ramp * FORK_SWEEP_CAP))
-	var fork_len := minf(min_len * randf_range(1.0, FORK_LEN_VARY_MAX), FORK_LEN_MAX)
+	var fork_len := min_len if island else minf(min_len * randf_range(1.0, FORK_LEN_VARY_MAX), FORK_LEN_MAX)
 	# gentle wind: amplitude is held under what the player can still track once it is
 	# stacked on the split peel (verified in the fairness harness)
 	var wave_amp := 0.0
 	var wave_phase := 0.0
-	if randf() < FORK_WAVE_CHANCE:
+	if not island and randf() < FORK_WAVE_CHANCE:
 		wave_amp = FORK_WAVE_AMP * randf_range(0.55, 1.0)
 		wave_phase = randf() * TAU
 	return {
-		"kind": "fork",
+		"kind": "fork", "island": island,
 		"d0": d0, "d1": d0 + fork_len, "off": max_off,
 		"wave_amp": wave_amp, "wave_len": FORK_WAVE_LEN * randf_range(0.8, 1.3), "wave_phase": wave_phase,
 		"lane0": { "side": -1.0, "off": off_l, "hw": hw_l, "t0": 0.0, "t1": 1.0, "ramp": ramp_l },
@@ -2341,6 +2584,7 @@ func _draw() -> void:
 			draw_circle(Vector2(hx, hy), OIL_R, COL_OIL)
 			draw_circle(Vector2(hx - OIL_R * 0.3, hy - OIL_R * 0.3), OIL_R * 0.35, COL_OIL_HI)
 		elif ht == "block":
+			draw_rect(Rect2(hx - BLOCK_W * 0.5 + SHADOW_OFF.x, hy - BLOCK_H * 0.5 + SHADOW_OFF.y, BLOCK_W, BLOCK_H), SHADOW_COL)
 			draw_rect(Rect2(hx - BLOCK_W * 0.5, hy - BLOCK_H * 0.5, BLOCK_W, BLOCK_H), COL_BLOCK)
 			for k in range(3):
 				draw_rect(Rect2(hx - BLOCK_W * 0.5 + 4.0 + k * 20.0, hy - BLOCK_H * 0.5, 9.0, BLOCK_H), COL_BLOCK_DARK)
@@ -2349,6 +2593,8 @@ func _draw() -> void:
 			# their sprite must face DOWN — the art is authored nose-up like the
 			# player, so flip it vertically (and negate the steer-lean to match the
 			# flip) instead of drawing it driving backwards.
+			draw_set_transform(Vector2(hx, hy) + SHADOW_OFF, float(h["ang"]), Vector2.ONE)
+			draw_rect(Rect2(-TRAFFIC_W * 0.5, -TRAFFIC_H * 0.5, TRAFFIC_W, TRAFFIC_H), SHADOW_COL)
 			if _tex_enemy.size() > 0:
 				var et: Texture2D = _tex_enemy[int(h.get("sprite", 0)) % _tex_enemy.size()]
 				draw_set_transform(Vector2(hx, hy), -float(h["ang"]), Vector2(1.0, -1.0))
@@ -2367,6 +2613,10 @@ func _draw() -> void:
 			ramp.append(Vector2(hx + jw * 0.5, hy + jh * 0.5))
 			ramp.append(Vector2(hx + jw * 0.35, hy - jh * 0.5))
 			ramp.append(Vector2(hx - jw * 0.35, hy - jh * 0.5))
+			var rsh := PackedVector2Array()
+			for rp in ramp:
+				rsh.append(rp + SHADOW_OFF)
+			draw_colored_polygon(rsh, SHADOW_COL)
 			draw_colored_polygon(ramp, COL_JUMP)
 			# launch chevrons across the ramp (a wide gap ramp gets several)
 			var chev := maxi(1, int(jw / 70.0))
@@ -2383,28 +2633,21 @@ func _draw() -> void:
 		var cy := _car_y - (float(coin["d"]) - distance)
 		if cy > -COIN_R and cy < _view_h + COIN_R:
 			var cx := _sx(float(coin["x"]))
+			draw_circle(Vector2(cx, cy) + SHADOW_OFF * 0.7, COIN_R, SHADOW_COL)
 			draw_circle(Vector2(cx, cy), COIN_R, COL_COIN)
 			draw_circle(Vector2(cx, cy), COIN_R * 0.55, COL_COIN_HI)
 
 	for pp in _particles:
 		var life := float(pp["life"])
 		var rem := 1.0 - float(pp["age"]) / life
-		if rem <= 0.0:
-			continue
-		var ec: Color = pp.get("col", COL_EXHAUST)
-		if bool(pp.get("streak", false)):
-			# tail-light ribbon: a short vertical bar that stays bright as it trails
-			ec.a = rem * 0.8
-			var c := _boom_screen(pp)
-			var w := float(pp["r"]) * 0.7
-			var h := float(pp["r"]) * (1.6 + rem * 2.4)
-			draw_rect(Rect2(c.x - w * 0.5, c.y - h * 0.5, w, h), ec)
-		else:
+		if rem > 0.0:
+			var ec: Color = pp.get("col", COL_EXHAUST)
 			ec.a = rem * 0.42
 			_draw_pix_square(_boom_screen(pp), float(pp["r"]) * (0.6 + rem * 0.6), ec)
 
 	# car (hidden once it has exploded; shown frozen during the resume countdown)
 	if state == State.PLAYING or state == State.COUNTDOWN:
+		_draw_taillights()   # under the car, over the road
 		# boost glow — flashes faster and reddens in its final BOOST_WARN seconds so
 		# you can read at a glance whether the smash-through is still live
 		if _boost_timer > 0.0:
@@ -2422,6 +2665,10 @@ func _draw() -> void:
 			lift = hop * 26.0
 			sc = 1.0 + hop * 0.18
 			draw_circle(Vector2(_sx(car_x), _car_y), CAR_HALF_W * 1.1, Color(0, 0, 0, 0.25))
+		else:
+			# grounded drop shadow (airborne uses the growing circle above instead)
+			draw_set_transform(Vector2(_sx(car_x), _car_y) + SHADOW_OFF, ang, Vector2.ONE)
+			draw_rect(Rect2(-CAR_HALF_W, -CAR_HALF_H, CAR_W, CAR_H), SHADOW_COL)
 		draw_set_transform(Vector2(_sx(car_x), _car_y - lift), ang, Vector2(sc, sc))
 		if _tex_car != null:
 			draw_texture_rect(_tex_car, Rect2(-CAR_HALF_W, -CAR_HALF_H, CAR_W, CAR_H), false)
@@ -2533,7 +2780,7 @@ func _draw_road() -> void:
 		var left := PackedVector2Array()
 		var right := PackedVector2Array()
 		var vs := PackedFloat32Array()
-		var centers: Array = []
+		var centers := PackedVector3Array()
 		var y := 0.0
 		while y <= _view_h:
 			var d := distance_at_row(y)
@@ -2559,8 +2806,8 @@ func _draw_road() -> void:
 	var r0 := PackedVector2Array()
 	var l1 := PackedVector2Array()
 	var r1 := PackedVector2Array()
-	var cen0: Array = []
-	var cen1: Array = []
+	var cen0 := PackedVector3Array()
+	var cen1 := PackedVector3Array()
 	var vs := PackedFloat32Array()
 	var split := PackedInt32Array()   # 1 where the two lane centres have parted — see DASH_SPLIT_EPS
 	var yy := 0.0
@@ -2590,56 +2837,92 @@ func _draw_road() -> void:
 
 
 # Fills a road band, textured (tiling along its length via the vs/UV-v values when
-# a road texture is loaded) or flat-coloured otherwise.
+# a road texture is loaded), rainbow-surfaced, or flat-coloured.
+#
+# All three paths render as ONE indexed triangle strip (two triangles per sample
+# row) instead of one huge concave polygon. draw_colored_polygon ear-clips its
+# input every frame, and on a road band — hundreds of nearly-collinear edge points
+# that pinch to zero width at fork merges — that triangulation both glitched
+# (sliver/flipped triangles flashing on bends and forks) and burned CPU. A strip
+# needs no triangulation at all, and a pinched row just makes two zero-area
+# triangles, which render as nothing.
 func _fill_band(left: PackedVector2Array, right: PackedVector2Array, vs := PackedFloat32Array()) -> void:
 	if _tex_road != null and vs.size() == left.size() and left.size() == right.size():
-		var poly := PackedVector2Array()
-		poly.append_array(left)
-		for i in range(right.size() - 1, -1, -1):
-			poly.append(right[i])
-		var uvs := PackedVector2Array()
-		for i in range(left.size()):
-			uvs.append(Vector2(0.0, vs[i]))
-		for i in range(right.size() - 1, -1, -1):
-			uvs.append(Vector2(1.0, vs[i]))
-		draw_colored_polygon(poly, Color.WHITE, uvs, _tex_road)
+		_draw_band_strip(left, right, Color.WHITE, _tex_road, vs)
 		return
 	if _theme_rainbow:
 		_fill_rainbow(left, right)
 		return
-	var flat := PackedVector2Array()
-	flat.append_array(left)
-	for i in range(right.size() - 1, -1, -1):
-		flat.append(right[i])
-	draw_colored_polygon(flat, col_road)
+	_draw_band_strip(left, right, col_road)
+
+
+# The shared strip renderer: rows of (left, right) vertex pairs, two triangles per
+# row gap, optional texture with u across the band (u0->u1) and per-row v.
+func _draw_band_strip(left: PackedVector2Array, right: PackedVector2Array, col: Color, tex: Texture2D = null, vs := PackedFloat32Array(), u0 := 0.0, u1 := 1.0) -> void:
+	var n := left.size()
+	if n < 2 or right.size() != n:
+		return
+	var pts := PackedVector2Array()
+	pts.resize(n * 2)
+	var cols := PackedColorArray()
+	cols.resize(n * 2)
+	cols.fill(col)
+	var use_tex := tex != null and vs.size() == n
+	var uvs := PackedVector2Array()
+	if use_tex:
+		uvs.resize(n * 2)
+	for i in range(n):
+		pts[i * 2] = left[i]
+		pts[i * 2 + 1] = right[i]
+		if use_tex:
+			uvs[i * 2] = Vector2(u0, vs[i])
+			uvs[i * 2 + 1] = Vector2(u1, vs[i])
+	RenderingServer.canvas_item_add_triangle_array(
+		get_canvas_item(), _strip_indices(n), pts, cols, uvs,
+		PackedInt32Array(), PackedFloat32Array(),
+		tex.get_rid() if use_tex else RID())
+
+
+# Index buffer for an n-row strip, cached — every band drawn in a frame has the
+# same row count (one sample per screen step), so this rebuilds only on resize.
+func _strip_indices(rows: int) -> PackedInt32Array:
+	var need := (rows - 1) * 6
+	if _strip_idx.size() != need:
+		_strip_idx.resize(need)
+		var w := 0
+		for i in range(rows - 1):
+			var a := i * 2
+			_strip_idx[w] = a
+			_strip_idx[w + 1] = a + 1
+			_strip_idx[w + 2] = a + 2
+			_strip_idx[w + 3] = a + 1
+			_strip_idx[w + 4] = a + 3
+			_strip_idx[w + 5] = a + 2
+			w += 6
+	return _strip_idx
 
 
 # Rainbow Lane surface: longitudinal ROYGBIV stripes running down the road (à la
 # Mario Kart's Rainbow Road), following the road through every bend, with a slow
 # hue scroll keyed to world-distance so the colours shimmer toward the player.
 #
-# This used to redraw SEVEN full-length concave polygons per band every frame (and
-# twice that inside a fork) — heavy: each one is hundreds of vertices the renderer
-# has to triangulate. Now the stripes live in a tiny precomputed texture (one column
-# per stripe, one row per cycle phase) and the whole surface is ONE textured polygon:
-# u runs 0->1 across the road width (nearest-sampled into 7 hard stripes) and v is
-# the current cycle phase. Same look, a single draw call.
+# The stripes live in a tiny precomputed texture (one column per stripe, one row
+# per cycle phase) and the surface renders through the same triangle strip as every
+# other band: u crosses the road width (nearest-sampled into 7 hard stripes, inset
+# off the exact 0/1 texel edges so the repeat wrap never bleeds a stray column) and
+# v picks the current cycle phase. One strip, no per-frame triangulation — this is
+# what removed both the fork/turn glitches and the per-frame polygon cost.
 func _fill_rainbow(left: PackedVector2Array, right: PackedVector2Array) -> void:
 	var n := left.size()
 	if n < 2 or right.size() != n:
 		return
 	if _tex_rainbow == null:
 		_build_rainbow_tex()
-	var v := fposmod(distance * 0.0012, 1.0)   # palette cycle phase (was the per-band hue shift)
-	var poly := PackedVector2Array()
-	var uvs := PackedVector2Array()
-	for i in range(n):
-		poly.append(left[i])
-		uvs.append(Vector2(0.0, v))
-	for i in range(n - 1, -1, -1):
-		poly.append(right[i])
-		uvs.append(Vector2(1.0, v))
-	draw_colored_polygon(poly, Color.WHITE, uvs, _tex_rainbow)
+	var v := fposmod(distance * 0.0012, 1.0)   # palette cycle phase
+	var vs := PackedFloat32Array()
+	vs.resize(n)
+	vs.fill(v)
+	_draw_band_strip(left, right, Color.WHITE, _tex_rainbow, vs, 0.001, 0.999)
 
 
 # RAINBOW_BANDS stripes across the width × 256 cycle phases down the rows. Sampled
@@ -2668,7 +2951,7 @@ func _build_rainbow_tex() -> void:
 # interpolated between the bracketing samples, rather than snapping to whichever
 # 3px sample happened to be "on". Snapping made every dash end jump by up to a
 # sample each frame as the road scrolled — the residual twitch in the lane lines.
-func _draw_dashes(centers: Array, mask := PackedInt32Array()) -> void:
+func _draw_dashes(centers: PackedVector3Array, mask := PackedInt32Array()) -> void:
 	if not _theme_stripes:
 		return
 	var use_mask := mask.size() == centers.size()
@@ -2803,8 +3086,10 @@ func _draw_decos() -> void:
 		if _tex_deco.size() > 0:
 			var tex: Texture2D = _tex_deco[variant % _tex_deco.size()]
 			var sz := tex.get_size() * s
+			draw_circle(pos + SHADOW_OFF, maxf(sz.x, sz.y) * 0.32, SHADOW_COL)
 			draw_texture_rect(tex, Rect2(pos - sz * 0.5, sz), false)
 		else:
+			draw_circle(pos + SHADOW_OFF, 13.0 * s, SHADOW_COL)
 			_draw_deco_primitive(pos, variant, s)
 
 
