@@ -25,20 +25,20 @@ alias it. (If you'd rather author at 2× for detail, also switch
 `rendering/textures/canvas_textures/default_texture_filter` to *Linear* in
 `project.godot`.)
 
-| Slot | File name(s) | Drawn at | **Author at (1×)** | Notes |
-|------|--------------|----------|--------------------|-------|
-| Player car | `car.png` | 50 × 90 px | **50 × 90** | Nose **up**. Transparent margins are fine — the hitbox auto-shrinks to the opaque pixels. |
-| Enemy cars | `enemy.png` or `enemy_0.png`, `enemy_1.png`, … | 50 × 90 px | **50 × 90** | Nose **up** too (the engine flips them vertically to face the oncoming player). One file = one variant; numbered = random per car. |
-| Decorations | `deco.png` or `deco_0.png`, `deco_1.png`, … | native × 0.8–1.5 (random) | **~64 × 64** (small props) up to **~96 × 128** (tall props) | Off-road scenery. Native size = on-screen size at scale 1.0; each prop is randomly scaled 0.8–1.5×. Center the art, transparent background. Keep ≲ 160 px so it fits the off-road band. |
-| Road surface | `road.png` | tiles down the road | **512 × 256** | `U` (0→1) stretches across the **road width** (which varies ~240–510 px); `V` repeats every **220 world px** of length. Make it **vertically seamless** and a **uniform surface** (asphalt/tarmac grain, water, snow…). Avoid baked-in lane lines or anything that must keep a fixed width — `U` stretching means it would squash on narrow road and duplicate per-lane through forks. |
-| Background | `background.png` | tiled full-screen | **512 × 512** | Off-road ground. Tiled in **both** axes and scrolled at 0.45× parallax, so it must be **seamless on all four edges**. 256×256 is lighter; 512×512 carries more detail. |
+| Slot | File name(s) | Drawn at | **Author at** | Notes |
+|------|--------------|----------|---------------|-------|
+| Player car | `car.png` | fit into 50 × 90, **aspect kept** | **~24 × 40–47** (drawn 2×) or 50 × 90 | Nose **up**. The sprite is never stretched: one uniform scale fits it into the 50 × 90 box, snapped to an integer (24-wide art lands on exactly 2×) so nearest-filtered pixels stay even. Hitbox **and shadow** auto-follow the opaque pixels — transparent margins are fine. |
+| Enemy cars | `enemy.png` or `enemy_0.png`, `enemy_1.png`, … | fit into 50 × 90, **aspect kept** | **~24 × 40–47** (drawn 2×) or 50 × 90 | Nose **up** too (the engine flips them vertically to face the oncoming player). One file = one variant; numbered = random per car. Same no-stretch fit, opaque-pixel hitbox/shadow as the player. |
+| Decorations | `deco.png` or `deco_0.png`, `deco_1.png`, … | native × 0.8–1.5 (random) | **~64 × 64** (small props) up to **~96 × 128** (tall props) | Off-road scenery. Native size = on-screen size at scale 1.0; each prop is randomly scaled 0.8–1.5×. Center the art, transparent background. Keep ≲ 160 px so it fits the off-road band. The shadow is the sprite itself tinted, so it matches the opaque pixels. |
+| Road surface | `road.png` | 256 × 256 **world px** per repeat | **256 × 256** | UVs are anchored to WORLD coordinates on **both** axes (no stretching across the road width), so make it **seamless on all four edges** and a **uniform surface** (asphalt/tarmac grain, water, snow…). Avoid baked-in lane lines or anything directional — the road wanders across the tile grid. |
+| Background | `background.png` | 256 × 256 **world px** per tile | **256 × 256** | Off-road ground. Tiled on the same 256-px world lattice as the road and scrolled **1:1 with it** (no parallax), so the ground and road read as one surface. Must be **seamless on all four edges**. Other sizes still load — they're drawn at the 256 × 256 world footprint. |
 
 ### Quick reference
 
-- **Cars / enemies:** 50 × 90, nose up, transparent margins.
+- **Cars / enemies:** ~24 × 40–47 (shown at 2×), nose up, transparent margins; never stretched — hitbox & shadow follow opaque pixels.
 - **Decorations:** ~64 × 64 (or up to ~96 × 128), centered, transparent.
-- **Road:** 512 × 256, vertically seamless, uniform.
-- **Background:** 512 × 512, seamless both directions.
+- **Road:** 256 × 256, seamless all four edges, uniform.
+- **Background:** 256 × 256, seamless all four edges, scrolls with the road.
 
 ## Audio (same convention, for reference)
 
