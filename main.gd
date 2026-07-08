@@ -27,9 +27,9 @@ const COL_HALF_H := 36.0
 const ROAD_CENTER_X := 360.0
 
 # ---------------- retro / pixel-art look ----------------
-# VFX pixel grid. Matched to the car art's native resolution (25x45 source px shown
-# at 50x90 => ~2px per art-pixel), so blocky effects read at the same scale as the
-# car instead of as coarse chunks. Road EDGES are drawn smooth (see _draw_road).
+# VFX pixel grid. Matched to the vehicle art's native resolution (~24x42 source px
+# drawn at 2x => 2px per art-pixel), so blocky effects read at the same scale as
+# the car instead of as coarse chunks. Road EDGES are drawn smooth (see _draw_road).
 const PIX := 2.0
 
 # ---------------- camera ----------------
@@ -107,6 +107,16 @@ const FORK_MEDIAN_FRAC := 0.12    # fork median half-width as a fraction of the 
 const FORK_SWEEP_CAP := 320.0     # peak sideways peel speed of a lane: forks are LENGTH-sized so this holds even at the real (boosted) top speed they're now driven at — a sideways-trackability fairness bound, not a forward-speed cap
 const BRANCH_STRAIGHT_DELTA := 48.0  # entry must be at least this straight (per 300px)
 const BRANCH_MAX_DRIFT := 150.0   # max sideways drift of the road across a fork; small => the straightened chord barely deviates, so the axis transient stays gentle on short forks
+# The track generator holds the road straight in a window around wherever the next
+# branch is due. The straightness/drift gates above are hard fairness rules, but
+# the road seeds bends on most segments, so left alone the two systems fought:
+# ~95% of placement attempts failed the gates, branches ran at well over their
+# intended spacing, and the rarer set-pieces (roundabout islands) practically
+# never appeared. Straightening the road exactly where a branch wants to live
+# makes the generator PRODUCE what the placement rules demand — same rules, no
+# forcing — and restores the intended branch cadence.
+const BRANCH_STRAIGHT_LEAD := 600.0   # straight starts this far before the due point (covers the entry gate)
+const BRANCH_STRAIGHT_SPAN := 4600.0  # give up this far past it and let the road bend again
 const BRANCH_COINS := 4           # coins seeded along the scenic lane
 
 # Fork variety: a branch picks a STYLE and randomises its geometry so no two read
@@ -191,8 +201,12 @@ const GAP_MIN := 50.0             # guaranteed passable gap (car-center room)
 const POST_BRANCH_CLEAR := 520.0  # clear road after a fork merges back
 const PRE_BRANCH_CLEAR := 280.0   # clear road just before a fork splits (so the choice reads clean)
 const FORK_HAZARD_GUARD := 0.06   # extra margin past a lane's ramp before a fork may host a hazard (keeps hazards out of the peel sweep)
-const BLOCK_W := 60.0
+const BLOCK_W := 60.0             # reference width (near-miss margin is derived from it)
 const BLOCK_H := 42.0
+# Roadblocks come in variable widths (zapper-style): anywhere between these two,
+# further capped at spawn time so the guaranteed GAP_MIN corridor always remains.
+const BLOCK_W_MIN := 46.0
+const BLOCK_W_MAX := 210.0
 const TRAFFIC_W := 50.0
 const TRAFFIC_H := 90.0
 const TRAFFIC_REL_MIN := 0.30     # enemy closing speed as a fraction of player speed
@@ -224,6 +238,21 @@ const RAMP_GAP_INSET := 6.0       # ramp half-width = road half-width minus this
 # THROUGH blockers and traffic instead of crashing, banking RAM_COINS per smash.
 const RAM_COINS := 2
 
+# ---------------- combo ----------------
+# Chained scoring: every scoring action (coin, near miss, jump landing, smash)
+# performed within COMBO_TIME of the previous one banks +COMBO_BONUS on top of its
+# own reward and refills the window. A ramp boost FREEZES the clock instead of
+# resetting it, so a smash-through spree carries its chain across the whole boost.
+const COMBO_TIME := 3.0
+const COMBO_BONUS := 1
+const COL_COMBO := Color("6ef3ff")
+
+# ---------------- lucky run ----------------
+# 1-in-100 runs are LUCKY: everything that pays coins pays double for the whole
+# run (all gains funnel through _grant_coins), announced by a gold banner and a
+# pulsing gold frame so it can't be missed.
+const LUCKY_CHANCE := 0.01
+
 # ---------------- background decorations ----------------
 # Purely cosmetic props scattered in the off-road on both sides (rocks/trees/etc.).
 # They carry a stable variant index so the art pipeline can map each to a per-theme
@@ -247,30 +276,40 @@ const COL_GAP := Color("070708")          # the hole itself (reads as a void in 
 const COL_GAP_RIM := Color("f4c20d")      # hazard-striped lip on the near edge
 
 # ---------------- trail VFX ----------------
-# What the car leaves behind, keyed by each theme's "vfx" name. A vfx is either the
-# tail-light trail (two smooth red streaks drawn as fading polylines along the car's
-# actual path — synthwave) or a set of spray LAYERS: exhaust smoke puffs from the
-# centre pipe and/or terrain kicked up from the rear wheels (dust/sand/mud/snow/
-# water), so rally reads smoke+dust, frostbite smoke+snow, and the jetski a pure
-# wake splash.
+# What the car leaves behind, keyed by each theme's "vfx" name. A vfx is either a
+# path trail — the tail-light streaks (synthwave) or the jetski's water wake, both
+# drawn as fading polylines along the car's actual path — or a set of spray LAYERS:
+# exhaust smoke puffs from the centre pipe and/or terrain kicked up from the rear
+# wheels (dust/sand/mud/snow), so rally reads smoke+dust and frostbite smoke+snow.
+# The wake also keeps a sparse splash layer on top, so it reads as displaced water
+# with the odd spray kick rather than a smoke column. Enemies emit from the same
+# per-theme sets (see _enemy_fx_layers), so traffic matches its world.
 const SPRAY_SMOKE  := { "cols": ["8a8a8a", "a8a8a8", "6e6e6e"], "wheels": false, "rmin": 3.5, "rmax": 7.0, "lmin": 0.50, "lmax": 0.90 }
 const SPRAY_DUST   := { "cols": ["b8a888", "9c8c6c", "cfc0a0"], "wheels": true,  "rmin": 2.5, "rmax": 5.0, "lmin": 0.35, "lmax": 0.60 }
 const SPRAY_SAND   := { "cols": ["e0c88c", "c2a45e", "efe0b0"], "wheels": true,  "rmin": 2.5, "rmax": 5.5, "lmin": 0.35, "lmax": 0.65 }
 const SPRAY_MUD    := { "cols": ["4a3520", "5b432a", "33240f"], "wheels": true,  "rmin": 3.0, "rmax": 6.0, "lmin": 0.40, "lmax": 0.70 }
 const SPRAY_SNOW   := { "cols": ["ffffff", "e8f2fa", "cfe0ee"], "wheels": true,  "rmin": 2.5, "rmax": 5.5, "lmin": 0.50, "lmax": 0.90 }
 const SPRAY_SPLASH := { "cols": ["bfeeff", "ffffff", "7fd4ec"], "wheels": true,  "rmin": 3.0, "rmax": 6.5, "lmin": 0.30, "lmax": 0.55 }
+# what synthwave ENEMIES shed (the player's taillight polylines don't scale to
+# traffic): tiny fading tail-light embers
+const SPRAY_TAIL   := { "cols": ["ff2433", "ff6a3d"], "wheels": false, "rmin": 2.0, "rmax": 3.5, "lmin": 0.22, "lmax": 0.40 }
 const VFX := {
 	"smoke":      { "layers": [SPRAY_SMOKE] },
 	"smoke_dust": { "layers": [SPRAY_SMOKE, SPRAY_DUST] },
 	"smoke_sand": { "layers": [SPRAY_SMOKE, SPRAY_SAND] },
 	"smoke_mud":  { "layers": [SPRAY_SMOKE, SPRAY_MUD] },
 	"smoke_snow": { "layers": [SPRAY_SMOKE, SPRAY_SNOW] },
-	"splash":     { "layers": [SPRAY_SPLASH] },
+	"wake":       { "layers": [SPRAY_SPLASH] },
 	"taillight":  { "layers": [] },
 }
 const COL_TAILLIGHT := Color("ff2433")   # the smooth red streak colour
 const TAILLIGHT_LEN := 240.0             # how far back (world px) the streaks reach
 const TAILLIGHT_MAX_PTS := 72            # history cap (samples are per-frame)
+# The jetski's water wake: two foam streaks that spread outward and fade with age.
+const COL_WAKE := Color("dff6ff")
+const WAKE_LEN := 230.0                  # how far back (world px) the wake reaches
+const WAKE_MAX_PTS := 64
+const WAKE_SPREAD := 30.0                # extra half-spread the streaks gain at the tail
 
 # ---------------- object shadows ----------------
 # Soft offset drop shadows under everything that sits ON the road/terrain, so
@@ -284,12 +323,16 @@ const COL_SPEED_MAX := Color("ff5a5f")
 const COL_SPEED := Color("e8e8e8")
 
 # ---------------- speedometer gauge ----------------
+# Rendered retro-instrument style: a ring of chunky PIX-snapped segments that
+# light with speed and a blocky needle, so the tachometer sits in the same
+# pixel-art language as the rest of the game (see _draw_speedometer).
 const GAUGE_CENTER := Vector2(118.0, 156.0)
 const GAUGE_R := 84.0
 const GAUGE_START_DEG := 140.0
 const GAUGE_END_DEG := 400.0
 const GAUGE_MIN_KMH := 90.0       # dial floor (just below start speed) so the needle has room to climb
 const GAUGE_MAX_KMH := 370.0      # ~MAX_SPEED * BOOST_MULT converted to km/h
+const GAUGE_SEGS := 24            # pixel segments around the dial
 const COL_GAUGE_BG := Color(0, 0, 0, 0.35)
 const COL_GAUGE_RING := Color(1, 1, 1, 0.25)
 const COL_GAUGE_TICK := Color(1, 1, 1, 0.4)
@@ -309,8 +352,13 @@ const SAVE_PATH := "user://twisty_roads.cfg"
 const ART_DIR := "res://art/"
 const ART_EXTS := ["png", "webp", "jpg", "jpeg", "svg"]
 const ART_LIST_MAX := 32          # highest index scanned for numbered series (enemy_0..enemy_31); gaps are fine
-const ROAD_TEX_TILE := 220.0      # world-distance the road texture spans before repeating
-const BG_TEX_PARALLAX := 0.45     # how much the background texture scrolls vs the world
+# Road AND background textures render at a fixed 256x256 world footprint (matching
+# the 256x256 reference art) and are anchored to WORLD coordinates on both axes —
+# the ground scrolls 1:1 with the road, so the world reads as one cohesive surface
+# instead of sliding parallax layers. Between them a whisper of darkening (see
+# BG_DARKEN) lifts the road plane without touching the pixel-art look.
+const WORLD_TEX_TILE := 256.0
+const BG_DARKEN := 0.05
 
 # ---------------- font ----------------
 # Convention-based, like the art/audio: drop a TTF/OTF at res://fonts/<name> and
@@ -327,18 +375,21 @@ const FONT_EXTS := ["ttf", "otf"]
 # "vehicle"/"enemy" name the vehicles, "vfx" names the effect set, "stripes" says
 # whether the road carries a painted centre line (off-road / track surfaces don't)
 # — these are the slots the art pipeline keys off (e.g. res://art/<id>/car.png).
+# Prices are sized against the combo-era income (chained bonuses + the odd Lucky
+# Run raise a typical run's take by roughly a third over the pre-combo economy),
+# so themes still land at about the same number of runs as before.
 const THEME_ORDER := ["default", "synthwave", "track", "rally", "jdm", "jetski", "sand", "mud", "rainbow", "frostbite"]
 const THEMES := {
 	"default":   { "name": "Standard",     "price": 0,    "offroad": "2e5d34", "road": "3c4146", "edge": "e8e8e8", "dash": "f2c14e", "stripes": true,  "car": "1f6fd0", "car_dark": "0d4a99", "vehicle": "BMW E46",          "enemy": "Toyota RAV4",       "vfx": "smoke" },
-	"synthwave": { "name": "Synthwave",    "price": 300,  "offroad": "1a0b2e", "road": "241341", "edge": "ff2e97", "dash": "00f0ff", "stripes": true,  "car": "ffd319", "car_dark": "ff5f1f", "vehicle": "Lamborghini Countach", "enemy": "Sports coupes", "vfx": "taillight" },
-	"track":     { "name": "Track Attack", "price": 400,  "offroad": "2e7d32", "road": "3a3a3a", "edge": "e03131", "dash": "ffffff", "stripes": false, "car": "e10600", "car_dark": "8a0400", "vehicle": "Open-wheel racer", "enemy": "Open-wheel racers", "vfx": "smoke" },
-	"rally":     { "name": "Rally Rush",   "price": 500,  "offroad": "234a25", "road": "6b4f2a", "edge": "caa15a", "dash": "ffffff", "stripes": false, "car": "1565c0", "car_dark": "0d47a1", "vehicle": "Subaru Impreza",   "enemy": "Mitsubishi Lancer", "vfx": "smoke_dust" },
-	"jdm":       { "name": "JDM",          "price": 600,  "offroad": "0d1b2a", "road": "23272e", "edge": "f72585", "dash": "4cc9f0", "stripes": true,  "car": "e6552a", "car_dark": "a83419", "vehicle": "Toyota Supra",     "enemy": "Mazda Miata",       "vfx": "smoke" },
-	"jetski":    { "name": "Jetski Escape","price": 700,  "offroad": "e3c98f", "road": "1f7a8c", "edge": "9be7ff", "dash": "ffffff", "stripes": false, "car": "ff5252", "car_dark": "b71c1c", "vehicle": "Jetski",          "enemy": "Jetskis",           "vfx": "splash" },
-	"sand":      { "name": "Sand Rally",   "price": 800,  "offroad": "c2954e", "road": "9c7a3c", "edge": "e8d6a0", "dash": "ffffff", "stripes": false, "car": "2e7d32", "car_dark": "1b5e20", "vehicle": "Rally buggy",      "enemy": "Porsche Safari",    "vfx": "smoke_sand" },
-	"mud":       { "name": "Mud Sprint",   "price": 900,  "offroad": "3b5323", "road": "5b432a", "edge": "8a6d3b", "dash": "ffffff", "stripes": false, "car": "d32f2f", "car_dark": "9a1f1f", "vehicle": "Enduro bike",      "enemy": "Enduro bikes",      "vfx": "smoke_mud" },
-	"rainbow":   { "name": "Rainbow Lane", "price": 1000, "offroad": "0b0b2a", "road": "3a2f5e", "edge": "ff5ec7", "dash": "ffffff", "stripes": true,  "car": "ffeb3b", "car_dark": "fbc02d", "vehicle": "Kart",            "enemy": "Karts",             "vfx": "smoke" },
-	"frostbite": { "name": "Frostbite Run","price": 1200, "offroad": "dfe9f0", "road": "8fa8bf", "edge": "5b86b0", "dash": "ffffff", "stripes": false, "car": "455a64", "car_dark": "263238", "vehicle": "Ford F-150",      "enemy": "Porsche Cayenne",   "vfx": "smoke_snow" },
+	"synthwave": { "name": "Synthwave",    "price": 400,  "offroad": "1a0b2e", "road": "241341", "edge": "ff2e97", "dash": "00f0ff", "stripes": true,  "car": "ffd319", "car_dark": "ff5f1f", "vehicle": "Lamborghini Countach", "enemy": "Sports coupes", "vfx": "taillight" },
+	"track":     { "name": "Track Attack", "price": 550,  "offroad": "2e7d32", "road": "3a3a3a", "edge": "e03131", "dash": "ffffff", "stripes": false, "car": "e10600", "car_dark": "8a0400", "vehicle": "Open-wheel racer", "enemy": "Open-wheel racers", "vfx": "smoke" },
+	"rally":     { "name": "Rally Rush",   "price": 700,  "offroad": "234a25", "road": "6b4f2a", "edge": "caa15a", "dash": "ffffff", "stripes": false, "car": "1565c0", "car_dark": "0d47a1", "vehicle": "Subaru Impreza",   "enemy": "Mitsubishi Lancer", "vfx": "smoke_dust" },
+	"jdm":       { "name": "JDM",          "price": 850,  "offroad": "0d1b2a", "road": "23272e", "edge": "f72585", "dash": "4cc9f0", "stripes": true,  "car": "e6552a", "car_dark": "a83419", "vehicle": "Toyota Supra",     "enemy": "Mazda Miata",       "vfx": "smoke" },
+	"jetski":    { "name": "Jetski Escape","price": 1000, "offroad": "e3c98f", "road": "1f7a8c", "edge": "9be7ff", "dash": "ffffff", "stripes": false, "car": "ff5252", "car_dark": "b71c1c", "vehicle": "Jetski",          "enemy": "Jetskis",           "vfx": "wake" },
+	"sand":      { "name": "Sand Rally",   "price": 1150, "offroad": "c2954e", "road": "9c7a3c", "edge": "e8d6a0", "dash": "ffffff", "stripes": false, "car": "2e7d32", "car_dark": "1b5e20", "vehicle": "Rally buggy",      "enemy": "Porsche Safari",    "vfx": "smoke_sand" },
+	"mud":       { "name": "Mud Sprint",   "price": 1300, "offroad": "3b5323", "road": "5b432a", "edge": "8a6d3b", "dash": "ffffff", "stripes": false, "car": "d32f2f", "car_dark": "9a1f1f", "vehicle": "Enduro bike",      "enemy": "Enduro bikes",      "vfx": "smoke_mud" },
+	"rainbow":   { "name": "Rainbow Lane", "price": 1500, "offroad": "0b0b2a", "road": "3a2f5e", "edge": "ff5ec7", "dash": "ffffff", "stripes": true,  "car": "ffeb3b", "car_dark": "fbc02d", "vehicle": "Kart",            "enemy": "Karts",             "vfx": "smoke" },
+	"frostbite": { "name": "Frostbite Run","price": 1800, "offroad": "dfe9f0", "road": "8fa8bf", "edge": "5b86b0", "dash": "ffffff", "stripes": false, "car": "455a64", "car_dark": "263238", "vehicle": "Ford F-150",      "enemy": "Porsche Cayenne",   "vfx": "smoke_snow" },
 }
 # Themes removed from the store. Anyone who had bought one gets its price refunded
 # on load, so no coins are ever lost to a retired theme.
@@ -483,6 +534,10 @@ var _strip_idx := PackedInt32Array()
 var _pl_hw := COL_HALF_W
 var _pl_hh := COL_HALF_H
 var _enemy_col: Array = []         # per enemy-sprite collision half-extents (Vector2)
+# Aspect-true draw sizes: sprites are never stretched to the canonical boxes, they
+# are uniformly scaled to fit them (integer pixel scale when close — see _fit_sprite).
+var _car_size := Vector2(CAR_W, CAR_H)
+var _enemy_size: Array = []        # per enemy-sprite draw size (Vector2)
 
 var _pt_d := PackedFloat32Array()
 var _pt_x := PackedFloat32Array()
@@ -516,6 +571,9 @@ var _exhaust_accum := 0.0
 # Tail-light streak history: one sample per frame of (left-lamp wx, right-lamp wx,
 # wd). Drawn as two fading polylines along the car's real path (see _draw_taillights).
 var _taillights: Array[Vector3] = []
+# Wake history (jetski): one (hull wx, unused, wd) sample per frame, drawn as two
+# spreading foam streaks along the real path (see _draw_wake).
+var _wake: Array[Vector3] = []
 var _oil_timer := 0.0
 var _air_timer := 0.0
 var _boost_timer := 0.0
@@ -525,6 +583,13 @@ var _count_timer := 0.0
 var _popups: Array = []
 var _ui_font: Font
 
+# combo chain state (see the COMBO constants)
+var _combo := 0                    # actions in the current chain (1 = chain armed)
+var _combo_timer := 0.0            # time left in the window; boost freezes it
+var _combo_flash := 0.0            # 1 -> 0 pulse driving the chain-bump ring/UI pop
+# lucky run (rolled once per run in _start_run)
+var _lucky_run := false
+
 # ---------------- audio ----------------
 # Convention-based, like the art slots: drop a file at res://audio/<name>.ogg
 # (or .wav/.mp3) and it plays automatically. Missing files are a silent no-op,
@@ -533,7 +598,7 @@ var _ui_font: Font
 # loop with a wide pitch shift, so going fast changes the engine's timbre
 # instead of just speeding up its pitch — avoids the droney/chipmunk effect.
 # Expected slots: crash, coin, land, near_miss, jump, smash, boost_end,
-# oil_squeal, horn, purchase, challenge, ui_tap, engine_low, engine_high.
+# oil_squeal, horn, purchase, challenge, combo, ui_tap, engine_low, engine_high.
 var _sfx_crash: AudioStreamPlayer
 var _sfx_coin: AudioStreamPlayer
 var _sfx_land: AudioStreamPlayer
@@ -545,6 +610,7 @@ var _sfx_oil: AudioStreamPlayer
 var _sfx_beep: AudioStreamPlayer
 var _sfx_purchase: AudioStreamPlayer
 var _sfx_challenge: AudioStreamPlayer
+var _sfx_combo: AudioStreamPlayer
 var _sfx_ui: AudioStreamPlayer
 var _engine_low: AudioStreamPlayer
 var _engine_high: AudioStreamPlayer
@@ -722,18 +788,39 @@ func _load_theme_art(id: String) -> void:
 	_tex_car = _load_tex(id, "car")
 	_tex_enemy = _load_tex_list(id, "enemy")
 	_tex_deco = _load_tex_list(id, "deco")
-	# Derive collision boxes from the loaded sprites' opaque content, clamped down to
-	# the canonical footprint so generation fairness is preserved (see _pl_hw note).
+	# Derive the aspect-true draw size of every vehicle sprite, then its collision
+	# box from the opaque content WITHIN that size, clamped down to the canonical
+	# footprint so generation fairness is preserved (see _pl_hw note).
 	_pl_hw = COL_HALF_W
 	_pl_hh = COL_HALF_H
+	_car_size = Vector2(CAR_W, CAR_H)
 	if _tex_car != null:
-		var e := _content_half(_tex_car, CAR_W, CAR_H)
+		_car_size = _fit_sprite(_tex_car, CAR_W, CAR_H)
+		var e := _content_half(_tex_car, _car_size.x, _car_size.y)
 		_pl_hw = minf(COL_HALF_W, e.x)
 		_pl_hh = minf(COL_HALF_H, e.y)
 	_enemy_col.clear()
+	_enemy_size.clear()
 	for t in _tex_enemy:
-		var ee := _content_half(t, TRAFFIC_W, TRAFFIC_H)
+		var esz := _fit_sprite(t, TRAFFIC_W, TRAFFIC_H)
+		_enemy_size.append(esz)
+		var ee := _content_half(t, esz.x, esz.y)
 		_enemy_col.append(Vector2(minf(TRAFFIC_W * 0.5, ee.x), minf(TRAFFIC_H * 0.5, ee.y)))
+
+
+# Draw size for a vehicle sprite: one uniform scale that fits the canonical box —
+# never a stretch, whatever the texture's own aspect ratio is. The scale snaps to
+# the nearest integer when it's close (the shipped 24x40..47 sprites land on an
+# exact 2x), so nearest-filtered art pixels stay even instead of shimmering.
+func _fit_sprite(tex: Texture2D, box_w: float, box_h: float) -> Vector2:
+	var ts := tex.get_size()
+	if ts.x <= 0.0 or ts.y <= 0.0:
+		return Vector2(box_w, box_h)
+	var s := minf(box_w / ts.x, box_h / ts.y)
+	var snap := roundf(s)
+	if snap >= 1.0 and absf(snap - s) <= s * 0.2:
+		s = snap
+	return ts * s
 
 
 # Half-extents (world px) of a sprite's OPAQUE content, mapped into the on-screen
@@ -831,6 +918,7 @@ func _build_audio() -> void:
 	_sfx_beep = _make_player("horn", "Master", -6.0)
 	_sfx_purchase = _make_player("purchase", "Master", -3.0)
 	_sfx_challenge = _make_player("challenge", "Master", -2.0)
+	_sfx_combo = _make_player("combo", "Master", -3.0)
 	_sfx_ui = _make_player("ui_tap", "Master", -6.0)
 	_engine_low = _make_player("engine_low", "Master", -10.0)
 	_engine_high = _make_player("engine_high", "Master", -10.0)
@@ -994,6 +1082,11 @@ func _reset_world() -> void:
 	_boom.clear()
 	_popups.clear()
 	_taillights.clear()
+	_wake.clear()
+	_combo = 0
+	_combo_timer = 0.0
+	_combo_flash = 0.0
+	_lucky_run = false
 	_run_near_miss = 0
 	_run_smashed = 0
 	_run_boost_time = 0.0
@@ -1049,6 +1142,7 @@ func _start_run() -> void:
 	_run_started = false
 	_apply_theme(selected)
 	_reset_world()
+	_lucky_run = randf() < LUCKY_CHANCE
 	_engine_low.stop()
 	_engine_high.stop()
 	_ensure_track(distance + _gen_ahead)
@@ -1131,7 +1225,7 @@ func _game_over() -> void:
 	var newly := _evaluate_challenges()
 	_save()
 	_go_score.text = "Distance: %.2f KM" % _dist_km()
-	_go_coins.text = "Coins earned: %d" % session_coins
+	_go_coins.text = "Coins earned: %d%s" % [session_coins, "   (LUCKY RUN 2x)" if _lucky_run else ""]
 	if newly.is_empty():
 		_go_challenge.text = ""
 	else:
@@ -1312,16 +1406,23 @@ func _update_play(delta: float) -> void:
 			_boost_warned = true
 			_play_sfx(_sfx_boost_end)
 			Input.vibrate_handheld(25)
+	# combo window: any scoring action refills it (see _combo_hit); a live ramp
+	# boost FREEZES the countdown instead of resetting it
+	if _combo_timer > 0.0 and _boost_timer <= 0.0:
+		_combo_timer -= delta
+		if _combo_timer <= 0.0:
+			_combo = 0
+	_combo_flash = maxf(_combo_flash - 3.5 * delta, 0.0)
 	if airborne:
 		_air_timer -= delta
 		if _air_timer <= 0.0:
 			# landed a jump: reward + speed boost
 			Input.vibrate_handheld(60)
-			session_coins += JUMP_COINS
+			var amt := _grant_coins(JUMP_COINS + _combo_hit())
 			_boost_timer = BOOST_TIME
 			_boost_warned = false
 			_boost_chain = 0   # a fresh boost starts a fresh smash chain (rampage feat)
-			_add_popup(_sx(car_x), _car_y - 30.0, "+%d" % JUMP_COINS, true)
+			_add_popup(_sx(car_x), _car_y - 30.0, "+%d" % amt, true)
 			_play_sfx(_sfx_land)
 
 	if airborne:
@@ -1369,12 +1470,12 @@ func _update_play(delta: float) -> void:
 		var cx := float(coin["x"])
 		if absf(cd - distance) < COL_HALF_H + COIN_R and absf(cx - car_x) < COL_HALF_W + COIN_R:
 			coin["got"] = true
-			session_coins += 1
 			_streak += 1
 			if _streak > _streak_best:
 				_streak_best = _streak
 			_no_coin_timer = 0.0
-			_add_popup(_sx(cx), _car_y - (cd - distance), "+1", true)
+			var amt := _grant_coins(1 + _combo_hit())
+			_add_popup(_sx(cx), _car_y - (cd - distance), "+%d" % amt, true)
 			_play_sfx(_sfx_coin)
 		elif cd < distance - (COL_HALF_H + COIN_R) and not coin.get("missed", false):
 			coin["missed"] = true
@@ -1382,7 +1483,7 @@ func _update_play(delta: float) -> void:
 
 	score = int(distance / 10.0)
 	_hud_score.text = "%.2f KM" % _dist_km()
-	_hud_coins.text = "Coins: %d" % session_coins
+	_hud_coins.text = "Coins: %d  (2x)" % session_coins if _lucky_run else "Coins: %d" % session_coins
 
 
 func _drop_old() -> void:
@@ -1450,9 +1551,12 @@ func _ensure_hazards(up_to: float) -> void:
 		var bandh := road_half_width(d) - COL_HALF_W
 		var roll := randf()
 		if roll < 0.20:
-			var eff := BLOCK_W * 0.5 + COL_HALF_W
-			if 2.0 * bandh >= 2.0 * eff + GAP_MIN:
-				_hazards.append({ "d": d, "x": bc + _flush_side(bandh, eff), "type": "block", "lane": 0.0, "ang": 0.0, "hit": false, "scored": false })
+			# variable-width roadblock (zapper-style): any width the fairness bound
+			# allows, flush to one side so a clean gap (>= GAP_MIN) always remains
+			var bw := _roll_block_w(bandh)
+			if bw > 0.0:
+				var eff := bw * 0.5 + COL_HALF_W
+				_hazards.append({ "d": d, "x": bc + _flush_side(bandh, eff), "type": "block", "w": bw, "lane": 0.0, "ang": 0.0, "hit": false, "scored": false })
 		elif roll < 0.58:
 			var eff2 := TRAFFIC_W * 0.5 + COL_HALF_W
 			if 2.0 * bandh >= 2.0 * eff2 + GAP_MIN:
@@ -1476,6 +1580,16 @@ func _flush_side(bandh: float, eff: float) -> float:
 	if randf() < 0.5:
 		return bandh - eff
 	return -(bandh - eff)
+
+
+# Random roadblock width for a band of half-width bandh (car-room already
+# subtracted): capped so a GAP_MIN corridor always survives beside it, or 0.0 if
+# even the narrowest block wouldn't leave one (the fairness gate).
+func _roll_block_w(bandh: float) -> float:
+	var wmax := minf(BLOCK_W_MAX, 2.0 * bandh - 2.0 * COL_HALF_W - GAP_MIN)
+	if wmax < BLOCK_W_MIN:
+		return 0.0
+	return randf_range(BLOCK_W_MIN, wmax)
 
 
 # True if d sits in the clear stretch just after a fork merges (a "blind sweep"
@@ -1539,14 +1653,14 @@ func _try_fork_hazard(b: Dictionary, d: float) -> void:
 			"hit": false, "scored": false, "spd": randf_range(TRAFFIC_REL_MIN, TRAFFIC_REL_MAX),
 			"sprite": randi(), "in_fork": true, "fork_lane": li, "fork_side": side })
 	elif roll < 0.75:
-		# static block flush to one side, clean gap on the other
-		var eff := BLOCK_W * 0.5 + COL_HALF_W
-		if 2.0 * bandh < 2.0 * eff + GAP_MIN:
+		# static variable-width block flush to one side, clean gap on the other
+		var bw := _roll_block_w(bandh)
+		if bw <= 0.0:
 			return
-		var bx := c + _flush_side(bandh, eff)
-		if _hazard_hits_coin(d, bx, BLOCK_W * 0.5, BLOCK_H * 0.5):
+		var bx := c + _flush_side(bandh, bw * 0.5 + COL_HALF_W)
+		if _hazard_hits_coin(d, bx, bw * 0.5, BLOCK_H * 0.5):
 			return
-		_hazards.append({ "d": d, "x": bx, "type": "block", "lane": 0.0, "ang": 0.0, "hit": false, "scored": false })
+		_hazards.append({ "d": d, "x": bx, "type": "block", "w": bw, "lane": 0.0, "ang": 0.0, "hit": false, "scored": false })
 	else:
 		# oil slick: makes you slip, never blocks
 		if bandh < OIL_R * 0.6 + 20.0:
@@ -1581,19 +1695,47 @@ func _spawn_jump_gap(d: float) -> float:
 	return d + reserve
 
 
+# Every coin gain funnels through here, so a Lucky Run doubles ALL of a run's
+# income (pickups, action rewards, combo bonuses) in one place. Returns the
+# amount actually banked, which is what the popups show.
+func _grant_coins(n: int) -> int:
+	if _lucky_run:
+		n *= 2
+	session_coins += n
+	return n
+
+
+# One scoring action (coin / near miss / jump landing / smash). Chained actions
+# inside the window bank +COMBO_BONUS each; ANY action refills the window to full.
+# Returns the bonus to fold into the action's own reward, so each popup shows one
+# combined amount instead of two overlapping ones.
+func _combo_hit() -> int:
+	var chained := _combo_timer > 0.0
+	_combo = _combo + 1 if chained else 1
+	_combo_timer = COMBO_TIME
+	if not chained:
+		return 0
+	_combo_flash = 1.0
+	if _sfx_combo != null and _sfx_combo.stream != null:
+		# pitch climbs with the chain, so the streak is audible without a glance
+		_sfx_combo.pitch_scale = minf(1.0 + 0.06 * float(_combo), 1.9)
+		_sfx_combo.play()
+	return COMBO_BONUS
+
+
 # Ploughing through a blocker/car while boosting from a ramp: destroy it, bank
 # RAM_COINS, and throw an explosion where it was. The hazard is flagged dead so it
 # stops colliding and drawing, then _drop_old clears it.
 func _smash_hazard(h: Dictionary) -> void:
 	h["dead"] = true
-	session_coins += RAM_COINS
 	_run_smashed += 1
 	_boost_chain += 1
 	_boost_chain_best = maxi(_boost_chain_best, _boost_chain)
+	var amt := _grant_coins(RAM_COINS + _combo_hit())
 	# explosion is anchored to the WORLD point it happened at, so it stays on the
 	# road as the camera scrolls past instead of sliding across the screen
 	_spawn_explosion(float(h["x"]), float(h["d"]))
-	_add_popup(_sx(float(h["x"])), _car_y - (float(h["d"]) - distance) - 24.0, "SMASH! +%d" % RAM_COINS, true, 240.0, true)
+	_add_popup(_sx(float(h["x"])), _car_y - (float(h["d"]) - distance) - 24.0, "SMASH! +%d" % amt, true, 240.0, true)
 	Input.vibrate_handheld(40)
 	_play_sfx(_sfx_smash)
 
@@ -1633,19 +1775,21 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 		var dy := absf(hd - distance)
 		var dx := absf(hx - car_x)
 		if htype == "block":
-			if not airborne and dy < _pl_hh + BLOCK_H * 0.5 and dx < _pl_hw + BLOCK_W * 0.5:
+			var bw: float = float(h.get("w", BLOCK_W))
+			if not airborne and dy < _pl_hh + BLOCK_H * 0.5 and dx < _pl_hw + bw * 0.5:
 				if ramming:
 					_smash_hazard(h)
 					continue
 				_crash()
 				return
 			# near miss: squeezed past a static block without crashing -> reward
-			# (never while ramming — a smash already paid out for this one)
-			if not ramming and not h["scored"] and dy < _pl_hh + BLOCK_H * 0.5 + 20.0 and dx < NEAR_MISS_DX:
+			# (never while ramming — a smash already paid out for this one). The
+			# window rides the block's edge, so wide blocks are no easier to score.
+			if not ramming and not h["scored"] and dy < _pl_hh + BLOCK_H * 0.5 + 20.0 and dx < bw * 0.5 + NEAR_MISS_DX - BLOCK_W * 0.5:
 				h["scored"] = true
-				session_coins += NEAR_MISS_COINS
 				_run_near_miss += 1
-				_add_popup(_sx(car_x), _car_y - 60.0, "Near Miss! +%d" % NEAR_MISS_COINS, true, 220.0, true)
+				var amt := _grant_coins(NEAR_MISS_COINS + _combo_hit())
+				_add_popup(_sx(car_x), _car_y - 60.0, "Near Miss! +%d" % amt, true, 220.0, true)
 				_play_sfx(_sfx_near_miss)
 		elif htype == "traffic":
 			# hitbox follows this enemy sprite's opaque content (and the player's), so
@@ -1661,9 +1805,9 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 			# (never while ramming — a smash already paid out for this one)
 			if not ramming and not h["scored"] and dy < _pl_hh + 20.0 and dx < NEAR_MISS_DX:
 				h["scored"] = true
-				session_coins += NEAR_MISS_COINS
 				_run_near_miss += 1
-				_add_popup(_sx(car_x), _car_y - 60.0, "Near Miss! +%d" % NEAR_MISS_COINS, true, 220.0, true)
+				var amt := _grant_coins(NEAR_MISS_COINS + _combo_hit())
+				_add_popup(_sx(car_x), _car_y - 60.0, "Near Miss! +%d" % amt, true, 220.0, true)
 				_play_sfx(_sfx_near_miss)
 			# random oncoming horn while the car is on screen ahead/behind
 			var bt: float = float(h.get("beep_t", randf_range(0.8, 2.4))) - delta
@@ -1671,6 +1815,14 @@ func _update_hazards(delta: float, airborne: bool) -> void:
 				bt = randf_range(1.6, 3.6)
 				_play_sfx(_sfx_beep)
 			h["beep_t"] = bt
+			# themed trail behind the enemy (same effect family as the player's),
+			# rate-limited per car and only while it's on screen
+			if hd - distance > _car_y - _view_h - 140.0 and hd - distance < _car_y + 140.0:
+				var ft: float = float(h.get("fx_t", randf_range(0.0, 0.12))) - delta
+				if ft <= 0.0:
+					ft += 0.11
+					_emit_enemy_fx(hx, hd)
+				h["fx_t"] = ft
 		elif htype == "oil":
 			if not h["hit"] and dy < OIL_R and dx < OIL_R:
 				h["hit"] = true
@@ -1717,10 +1869,18 @@ func _emit_trail(delta: float) -> void:
 		while _taillights.size() > TAILLIGHT_MAX_PTS or (_taillights.size() > 0 and _taillights[0].z < distance - TAILLIGHT_LEN):
 			_taillights.remove_at(0)
 		return
+	if _theme_vfx == "wake":
+		# water wake: record the hull's path (drawn as two spreading foam streaks in
+		# _draw_wake); the splash layer below still runs, just sparser, so the trail
+		# reads as displaced water with the odd spray kick instead of a puff column.
+		_wake.append(Vector3(car_x, 0.0, distance - CAR_HALF_H * 0.8))
+		while _wake.size() > WAKE_MAX_PTS or (_wake.size() > 0 and _wake[0].z < distance - WAKE_LEN):
+			_wake.remove_at(0)
 	var fx: Dictionary = VFX.get(_theme_vfx, VFX["smoke"])
+	var interval := 0.09 if _theme_vfx == "wake" else 0.04
 	_exhaust_accum += delta
-	while _exhaust_accum > 0.04:
-		_exhaust_accum -= 0.04
+	while _exhaust_accum > interval:
+		_exhaust_accum -= interval
 		for layer in fx["layers"]:
 			var life := randf_range(float(layer["lmin"]), float(layer["lmax"]))
 			var r := randf_range(float(layer["rmin"]), float(layer["rmax"]))
@@ -1737,6 +1897,40 @@ func _emit_trail(delta: float) -> void:
 				"off": Vector2.ZERO, "vel": vel,
 				"age": 0.0, "life": life, "r": r, "col": Color(cols[randi() % cols.size()]),
 			})
+
+
+# The spray set ENEMIES shed for the current theme — the same per-theme layers the
+# player emits, except synthwave, whose polyline tail-lights don't scale to traffic
+# and become tiny ember particles instead.
+func _enemy_fx_layers() -> Array:
+	if _theme_vfx == "taillight":
+		return [SPRAY_TAIL]
+	var fx: Dictionary = VFX.get(_theme_vfx, VFX["smoke"])
+	return fx["layers"]
+
+
+# One themed trail puff behind an enemy at world (ex, ed). Enemies travel DOWN the
+# screen, so the plume is anchored behind them (larger d) and drifts up-screen —
+# mirroring the player's emitter with the direction flipped, at ~80% scale.
+func _emit_enemy_fx(ex: float, ed: float) -> void:
+	var layers := _enemy_fx_layers()
+	if layers.is_empty():
+		return
+	var layer: Dictionary = layers[randi() % layers.size()]
+	var wx := ex + randf_range(-5.0, 5.0)
+	var vel := Vector2(randf_range(-12.0, 12.0), randf_range(-60.0, -30.0))
+	if bool(layer["wheels"]):
+		var side := -1.0 if randf() < 0.5 else 1.0
+		wx = ex + side * TRAFFIC_W * 0.34
+		vel = Vector2(side * randf_range(8.0, 30.0), randf_range(-80.0, -45.0))
+	var cols: Array = layer["cols"]
+	_particles.append({
+		"wx": wx, "wd": ed + TRAFFIC_H * 0.4,
+		"off": Vector2.ZERO, "vel": vel,
+		"age": 0.0, "life": randf_range(float(layer["lmin"]), float(layer["lmax"])) * 0.8,
+		"r": randf_range(float(layer["rmin"]), float(layer["rmax"])) * 0.8,
+		"col": Color(cols[randi() % cols.size()]),
+	})
 
 
 # The synthwave tail-lights: the recorded lamp path drawn as two polylines whose
@@ -1772,6 +1966,44 @@ func _draw_taillights() -> void:
 	draw_polyline_colors(rpts, glow, 10.0, true)
 	draw_polyline_colors(lpts, cols, 4.0, true)
 	draw_polyline_colors(rpts, cols, 4.0, true)
+
+
+# The jetski's water wake: the recorded hull path drawn as two foam streaks that
+# spread outward and fade as they age (wide soft wash under a narrow bright crest,
+# same two-pass trick as the tail-lights), with a slow shimmer keyed to world
+# distance so the water reads as moving. Pure polylines along an already-kept
+# history — no extra per-frame state beyond the two point arrays.
+func _draw_wake() -> void:
+	var n := _wake.size()
+	if n < 2:
+		return
+	var lpts := PackedVector2Array()
+	var rpts := PackedVector2Array()
+	var cols := PackedColorArray()
+	lpts.resize(n)
+	rpts.resize(n)
+	cols.resize(n)
+	for i in range(n):
+		var s: Vector3 = _wake[i]
+		var f := float(i) / float(n - 1)   # 0 = oldest (tail) -> 1 = at the hull
+		var y := _car_y - (s.z - distance)
+		var spread := CAR_HALF_W * 0.55 + (1.0 - f) * WAKE_SPREAD
+		spread += sin(s.z * 0.11 + time_alive * 7.0) * 1.6   # water shimmer
+		lpts[i] = Vector2(_sx(s.x) - spread, y)
+		rpts[i] = Vector2(_sx(s.x) + spread, y)
+		var c := COL_WAKE
+		c.a = f * f * 0.55
+		cols[i] = c
+	var wash := PackedColorArray()
+	wash.resize(n)
+	for i in range(n):
+		var w := cols[i]
+		w.a *= 0.4
+		wash[i] = w
+	draw_polyline_colors(lpts, wash, 9.0, true)
+	draw_polyline_colors(rpts, wash, 9.0, true)
+	draw_polyline_colors(lpts, cols, 3.5, true)
+	draw_polyline_colors(rpts, cols, 3.5, true)
 
 
 func _update_particles(delta: float) -> void:
@@ -1921,13 +2153,29 @@ func _force_turn() -> void:
 
 # Queue one curated formation: the recipe's authored shape, mirrored at random and
 # amplitude-scaled by the difficulty ramp, laid out relative to the current road x.
+#
+# The whole shape is fitted to the slope cap as ONE unit. The authored steps are
+# steeper than the cap allows, and letting the per-step fairness clamp in
+# _ensure_track resolve that stretched only the steep steps (2-4x) while the flat
+# ones kept their authored length — which warped every formation into anonymous
+# wander; this is why the hand-made set-pieces never visibly appeared. Fitting
+# here trims the amplitude a little and then stretches EVERY step by one shared
+# factor, so the shape survives intact and the cap (fairness) still holds.
 func _queue_formation() -> void:
 	var f: Dictionary = FORMATIONS[randi() % FORMATIONS.size()]
 	var base := _track_last_x
 	var dir := -1.0 if randf() < 0.5 else 1.0
 	var amp := float(f["amp"]) * lerpf(0.65, 1.0, _turn_factor())
+	var cap := _slope_cap()
+	var need := 1.0   # stretch the authored pacing would need to respect the cap
+	var prev := 0.0
 	for st in f["steps"]:
-		_pattern_queue.append({ "x": base + dir * amp * float(st["dx"]), "len": float(st["len"]) })
+		need = maxf(need, absf(float(st["dx"]) - prev) * amp / (float(st["len"]) * cap))
+		prev = float(st["dx"])
+	amp *= clampf(1.0 / need, 0.7, 1.0)   # concede up to 30% of the swing first...
+	var k := maxf(need * 0.7, 1.0) if need > 1.0 / 0.7 else 1.0   # ...then stretch uniformly
+	for st in f["steps"]:
+		_pattern_queue.append({ "x": base + dir * amp * float(st["dx"]), "len": float(st["len"]) * k })
 
 
 func _maybe_seed_pattern() -> void:
@@ -1970,6 +2218,13 @@ func _ensure_track(up_to: float) -> void:
 		# intro: dead-straight, no patterns, hazard-free (set elsewhere)
 		if _track_frontier_d < INTRO_DIST:
 			_push_point(200.0, ROAD_CENTER_X)
+			continue
+
+		# a branch is due around here: run out the current pattern, then hold the
+		# road straight so the branch gates can pass (see BRANCH_STRAIGHT_LEAD)
+		if _pattern_queue.is_empty() and _branch_wants_straight(_track_frontier_d):
+			_push_point(220.0, _track_last_x)
+			_straight_run = 0.0   # intentional straight — don't trip the forced bend
 			continue
 
 		var tf := _turn_factor()
@@ -2190,6 +2445,14 @@ func _clamp_to_nearest_lane(d: float, x: float) -> float:
 	return clampf(x, float(best["c"]) - m, float(best["c"]) + m)
 
 
+# True while d sits in the hold-straight window around the next branch's due
+# point. Once the branch is placed _next_branch_d jumps ahead and the window
+# closes; if placement keeps failing anyway, the span bound lets the road bend
+# again rather than running straight forever.
+func _branch_wants_straight(d: float) -> bool:
+	return d > _next_branch_d - BRANCH_STRAIGHT_LEAD and d < _next_branch_d + BRANCH_STRAIGHT_SPAN
+
+
 func _ensure_branches(up_to: float) -> void:
 	# scan forward in small steps; once we're past the spacing gate, drop a branch
 	# at the first stretch straight enough to make committing to a lane fair
@@ -2358,7 +2621,7 @@ func _coin_blocked(d: float, x: float) -> bool:
 		var half_w: float
 		var half_h: float
 		if htype == "block":
-			half_w = BLOCK_W * 0.5
+			half_w = float(h.get("w", BLOCK_W)) * 0.5
 			half_h = BLOCK_H * 0.5
 		elif htype == "oil":
 			half_w = OIL_R
@@ -2491,15 +2754,16 @@ func _draw_hint_arrow(d: float, dir: float, word: String, sub: String, active: b
 		draw_string(_ui_font, Vector2(ax - 90.0, y + 72.0), sub, HORIZONTAL_ALIGNMENT_CENTER, 180.0, 18, col)
 
 
-# Speed gauge: a swept dial (gap at the bottom) with a redline zone, tick
-# marks, and a needle, drawn in fixed screen space like the other HUD overlays.
+# Speed gauge, retro-instrument style: a ring of chunky PIX-snapped segments that
+# light up with speed (green -> yellow -> red, the redline zone keyed red even
+# unlit), a blocky needle built from pixel squares, and the km/h readout in the
+# pixel font. Same dial geometry and read as the old smooth version — only the
+# rendering changed, so it finally speaks the game's pixel-art language.
 func _draw_speedometer() -> void:
 	var kmh := current_speed() / PX_PER_METER * 3.6
 	var span := GAUGE_MAX_KMH - GAUGE_MIN_KMH
 	var frac := clampf((kmh - GAUGE_MIN_KMH) / span, 0.0, 1.0)
 	var redline_frac := clampf((MAX_SPEED / PX_PER_METER * 3.6 - GAUGE_MIN_KMH) / span, 0.0, 1.0)
-	var start_rad := deg_to_rad(GAUGE_START_DEG)
-	var end_rad := deg_to_rad(GAUGE_END_DEG)
 
 	# colour grades green -> yellow -> red as the dial fills; locks to the state
 	# colours at the top end so MAX/BOOST read at a glance
@@ -2513,48 +2777,72 @@ func _draw_speedometer() -> void:
 		fill_col = COL_SPEED_MAX
 		hot = true
 
-	# a tiny needle vibration at the top end makes the gauge feel alive
-	var jitter := 0.0
-	if hot:
-		jitter = sin(time_alive * 42.0) * 0.013
-	var needle_rad := deg_to_rad(lerpf(GAUGE_START_DEG, GAUGE_END_DEG, frac)) + jitter
+	_draw_pix_disc(GAUGE_CENTER, GAUGE_R + 16.0, COL_GAUGE_BG)
 
-	# backing dial + redline zone
-	draw_circle(GAUGE_CENTER, GAUGE_R + 14.0, COL_GAUGE_BG)
-	draw_arc(GAUGE_CENTER, GAUGE_R, start_rad, end_rad, 48, COL_GAUGE_RING, 8.0, true)
-	var redline_rad := deg_to_rad(lerpf(GAUGE_START_DEG, GAUGE_END_DEG, redline_frac))
-	draw_arc(GAUGE_CENTER, GAUGE_R, redline_rad, end_rad, 16, COL_GAUGE_REDZONE, 8.0, true)
-
-	# filled progress arc — this is the part that visibly sweeps up with speed
-	if hot:
-		var pulse := 0.5 + 0.5 * sin(time_alive * 16.0)
-		var glow := fill_col
-		glow.a = 0.22 + 0.22 * pulse
-		draw_arc(GAUGE_CENTER, GAUGE_R, start_rad, needle_rad, 40, glow, 17.0, true)
-	if needle_rad > start_rad + 0.01:
-		draw_arc(GAUGE_CENTER, GAUGE_R, start_rad, needle_rad, 40, fill_col, 9.0, true)
-
-	for i in range(7):
-		var t := i / 6.0
+	# segment ring: lit up to the current speed, dim ring/red-keyed beyond it
+	var pulse := 0.5 + 0.5 * sin(time_alive * 16.0)
+	var lit := int(roundf(frac * GAUGE_SEGS))
+	for i in range(GAUGE_SEGS):
+		var t := (float(i) + 0.5) / float(GAUGE_SEGS)
 		var rad := deg_to_rad(lerpf(GAUGE_START_DEG, GAUGE_END_DEG, t))
-		var dir := Vector2(cos(rad), sin(rad))
-		draw_line(GAUGE_CENTER + dir * (GAUGE_R - 6.0), GAUGE_CENTER + dir * (GAUGE_R + 8.0), COL_GAUGE_TICK, 3.0)
+		var p := GAUGE_CENTER + Vector2(cos(rad), sin(rad)) * GAUGE_R
+		var col: Color
+		if i < lit:
+			col = Color(0.25, 0.9, 0.45).lerp(Color(1.0, 0.82, 0.2), clampf(t * 1.6, 0.0, 1.0))
+			col = col.lerp(Color(1.0, 0.32, 0.26), clampf((t - 0.55) * 2.2, 0.0, 1.0))
+			if hot:
+				col = fill_col
+				col.a = 0.55 + 0.45 * pulse
+		else:
+			col = COL_GAUGE_REDZONE if t >= redline_frac else COL_GAUGE_RING
+			col.a = 0.3
+		_draw_pix_square(p, 4.0, col)
 
-	# needle (counter-weighted) + hub
+	# major tick blocks just outside the segment ring
+	for i in range(7):
+		var tt := i / 6.0
+		var trad := deg_to_rad(lerpf(GAUGE_START_DEG, GAUGE_END_DEG, tt))
+		_draw_pix_square(GAUGE_CENTER + Vector2(cos(trad), sin(trad)) * (GAUGE_R + 11.0), 2.0, COL_GAUGE_TICK)
+
+	# blocky needle: a run of pixel squares from the hub out (with the old
+	# top-end vibration so the gauge still feels alive when it's pinned)
+	var jitter := sin(time_alive * 42.0) * 0.013 if hot else 0.0
+	var needle_rad := deg_to_rad(lerpf(GAUGE_START_DEG, GAUGE_END_DEG, frac)) + jitter
 	var ndir := Vector2(cos(needle_rad), sin(needle_rad))
-	draw_line(GAUGE_CENTER - ndir * 11.0, GAUGE_CENTER + ndir * (GAUGE_R - 14.0), fill_col, 5.0, true)
-	draw_circle(GAUGE_CENTER, 10.0, fill_col)
-	draw_circle(GAUGE_CENTER, 5.0, Color(0, 0, 0, 0.6))
+	var nr := 8.0
+	while nr < GAUGE_R - 14.0:
+		_draw_pix_square(GAUGE_CENTER + ndir * nr, 2.6, fill_col)
+		nr += PIX * 2.0
+	_draw_pix_square(GAUGE_CENTER, 5.0, fill_col)
+	_draw_pix_square(GAUGE_CENTER, 2.5, Color(0, 0, 0, 0.6))
 
 	if _ui_font != null:
 		draw_string(_ui_font, GAUGE_CENTER + Vector2(-54, GAUGE_R + 30.0), "%d" % int(kmh), HORIZONTAL_ALIGNMENT_CENTER, 108, 38, fill_col)
 		draw_string(_ui_font, GAUGE_CENTER + Vector2(-54, GAUGE_R + 58.0), "KM/H", HORIZONTAL_ALIGNMENT_CENTER, 108, 16, Color(1, 1, 1, 0.55))
 
 
+# A filled disc built from PIX-grid rows, so even the gauge's backing plate obeys
+# the pixel grid instead of being a smooth circle.
+func _draw_pix_disc(center: Vector2, r: float, col: Color) -> void:
+	var q := PIX * 2.0
+	var y := -r
+	while y <= r:
+		var half := sqrt(maxf(r * r - y * y, 0.0))
+		var yy := roundf((center.y + y) / q) * q
+		var x0 := roundf((center.x - half) / q) * q
+		var x1 := roundf((center.x + half) / q) * q
+		draw_rect(Rect2(x0, yy, maxf(x1 - x0, q), q), col)
+		y += q
+
+
 func _draw() -> void:
 	_draw_background()
 	_draw_parallax()
 	_draw_decos()        # off-road props sit behind the road surface
+	# a whisper of darkening over everything off-road (the road is painted on top
+	# at full brightness) lifts the driving plane for depth — one flat rect, so it
+	# costs nothing and can't soften the pixel art
+	draw_rect(Rect2(0, 0, SCREEN_W, _view_h), Color(0, 0, 0, BG_DARKEN))
 	_draw_road()
 
 	var in_game := state == State.PLAYING or state == State.CRASH or state == State.GAME_OVER or state == State.COUNTDOWN
@@ -2584,22 +2872,32 @@ func _draw() -> void:
 			draw_circle(Vector2(hx, hy), OIL_R, COL_OIL)
 			draw_circle(Vector2(hx - OIL_R * 0.3, hy - OIL_R * 0.3), OIL_R * 0.35, COL_OIL_HI)
 		elif ht == "block":
-			draw_rect(Rect2(hx - BLOCK_W * 0.5 + SHADOW_OFF.x, hy - BLOCK_H * 0.5 + SHADOW_OFF.y, BLOCK_W, BLOCK_H), SHADOW_COL)
-			draw_rect(Rect2(hx - BLOCK_W * 0.5, hy - BLOCK_H * 0.5, BLOCK_W, BLOCK_H), COL_BLOCK)
-			for k in range(3):
-				draw_rect(Rect2(hx - BLOCK_W * 0.5 + 4.0 + k * 20.0, hy - BLOCK_H * 0.5, 9.0, BLOCK_H), COL_BLOCK_DARK)
+			var bw: float = float(h.get("w", BLOCK_W))
+			draw_rect(Rect2(hx - bw * 0.5 + SHADOW_OFF.x, hy - BLOCK_H * 0.5 + SHADOW_OFF.y, bw, BLOCK_H), SHADOW_COL)
+			draw_rect(Rect2(hx - bw * 0.5, hy - BLOCK_H * 0.5, bw, BLOCK_H), COL_BLOCK)
+			# hazard striping scales with the block's width
+			var nstripes := maxi(2, int(bw / 20.0))
+			var pitch := (bw - 8.0) / float(nstripes)
+			for k in range(nstripes):
+				draw_rect(Rect2(hx - bw * 0.5 + 4.0 + float(k) * pitch, hy - BLOCK_H * 0.5, pitch * 0.45, BLOCK_H), COL_BLOCK_DARK)
 		elif ht == "traffic":
 			# Enemies are ONCOMING (they travel down-screen, toward the player), so
 			# their sprite must face DOWN — the art is authored nose-up like the
 			# player, so flip it vertically (and negate the steer-lean to match the
 			# flip) instead of drawing it driving backwards.
-			draw_set_transform(Vector2(hx, hy) + SHADOW_OFF, float(h["ang"]), Vector2.ONE)
-			draw_rect(Rect2(-TRAFFIC_W * 0.5, -TRAFFIC_H * 0.5, TRAFFIC_W, TRAFFIC_H), SHADOW_COL)
 			if _tex_enemy.size() > 0:
-				var et: Texture2D = _tex_enemy[int(h.get("sprite", 0)) % _tex_enemy.size()]
+				var idx := int(h.get("sprite", 0)) % _tex_enemy.size()
+				var et: Texture2D = _tex_enemy[idx]
+				var esz: Vector2 = _enemy_size[idx]
+				var erect := Rect2(-esz.x * 0.5, -esz.y * 0.5, esz.x, esz.y)
+				# the shadow is the sprite itself tinted, so it hugs the opaque pixels
+				draw_set_transform(Vector2(hx, hy) + SHADOW_OFF, -float(h["ang"]), Vector2(1.0, -1.0))
+				draw_texture_rect(et, erect, false, SHADOW_COL)
 				draw_set_transform(Vector2(hx, hy), -float(h["ang"]), Vector2(1.0, -1.0))
-				draw_texture_rect(et, Rect2(-TRAFFIC_W * 0.5, -TRAFFIC_H * 0.5, TRAFFIC_W, TRAFFIC_H), false)
+				draw_texture_rect(et, erect, false)
 			else:
+				draw_set_transform(Vector2(hx, hy) + SHADOW_OFF, float(h["ang"]), Vector2.ONE)
+				draw_rect(Rect2(-TRAFFIC_W * 0.5, -TRAFFIC_H * 0.5, TRAFFIC_W, TRAFFIC_H), SHADOW_COL)
 				draw_set_transform(Vector2(hx, hy), float(h["ang"]), Vector2.ONE)
 				draw_rect(Rect2(-TRAFFIC_W * 0.5, -TRAFFIC_H * 0.5, TRAFFIC_W, TRAFFIC_H), COL_TRAFFIC)
 				# windshield toward the player (front of the oncoming car)
@@ -2647,7 +2945,11 @@ func _draw() -> void:
 
 	# car (hidden once it has exploded; shown frozen during the resume countdown)
 	if state == State.PLAYING or state == State.COUNTDOWN:
-		_draw_taillights()   # under the car, over the road
+		# path trail under the car, over the road
+		if _theme_vfx == "wake":
+			_draw_wake()
+		else:
+			_draw_taillights()
 		# boost glow — flashes faster and reddens in its final BOOST_WARN seconds so
 		# you can read at a glance whether the smash-through is still live
 		if _boost_timer > 0.0:
@@ -2656,23 +2958,36 @@ func _draw() -> void:
 			var gcol := COL_BOOST.lerp(Color(1.0, 0.3, 0.22), 0.6) if ending else COL_BOOST
 			gcol.a = (0.5 if ending else 0.35) * pulse
 			draw_circle(Vector2(_sx(car_x), _car_y), CAR_W * (0.95 + 0.12 * pulse), gcol)
+		# chain bump: an expanding ring of pixel squares pops off the car
+		if _combo_flash > 0.0:
+			var cr := CAR_W * (0.8 + (1.0 - _combo_flash) * 1.2)
+			var rc := COL_COMBO
+			rc.a = _combo_flash * 0.8
+			for i in range(10):
+				var ra := TAU * float(i) / 10.0
+				_draw_pix_square(Vector2(_sx(car_x), _car_y) + Vector2(cos(ra), sin(ra)) * cr, 2.5, rc)
 		var ang := _car_angle()
 		var lift := 0.0
 		var sc := 1.0
+		var sh_off := SHADOW_OFF
 		if _air_timer > 0.0:
 			var phase := 1.0 - _air_timer / AIR_TIME
 			var hop := sin(phase * PI)
 			lift = hop * 26.0
 			sc = 1.0 + hop * 0.18
-			draw_circle(Vector2(_sx(car_x), _car_y), CAR_HALF_W * 1.1, Color(0, 0, 0, 0.25))
-		else:
-			# grounded drop shadow (airborne uses the growing circle above instead)
-			draw_set_transform(Vector2(_sx(car_x), _car_y) + SHADOW_OFF, ang, Vector2.ONE)
-			draw_rect(Rect2(-CAR_HALF_W, -CAR_HALF_H, CAR_W, CAR_H), SHADOW_COL)
-		draw_set_transform(Vector2(_sx(car_x), _car_y - lift), ang, Vector2(sc, sc))
+			sh_off = SHADOW_OFF * (1.0 + hop * 2.2)   # the shadow falls away with height
+		var chw := _car_size.x * 0.5
+		var chh := _car_size.y * 0.5
 		if _tex_car != null:
-			draw_texture_rect(_tex_car, Rect2(-CAR_HALF_W, -CAR_HALF_H, CAR_W, CAR_H), false)
+			# the shadow is the sprite itself tinted, so it hugs the opaque pixels
+			draw_set_transform(Vector2(_sx(car_x), _car_y) + sh_off, ang, Vector2.ONE)
+			draw_texture_rect(_tex_car, Rect2(-chw, -chh, _car_size.x, _car_size.y), false, SHADOW_COL)
+			draw_set_transform(Vector2(_sx(car_x), _car_y - lift), ang, Vector2(sc, sc))
+			draw_texture_rect(_tex_car, Rect2(-chw, -chh, _car_size.x, _car_size.y), false)
 		else:
+			draw_set_transform(Vector2(_sx(car_x), _car_y) + sh_off, ang, Vector2.ONE)
+			draw_rect(Rect2(-CAR_HALF_W, -CAR_HALF_H, CAR_W, CAR_H), SHADOW_COL)
+			draw_set_transform(Vector2(_sx(car_x), _car_y - lift), ang, Vector2(sc, sc))
 			draw_rect(Rect2(-CAR_HALF_W, -CAR_HALF_H, CAR_W, CAR_H), col_car)
 			draw_rect(Rect2(-CAR_HALF_W + 8.0, -CAR_HALF_H + 18.0, CAR_W - 16.0, 30.0), col_car_dark)
 		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
@@ -2687,6 +3002,8 @@ func _draw() -> void:
 
 	if state == State.PLAYING or state == State.COUNTDOWN or state == State.CRASH:
 		_draw_speedometer()
+		_draw_combo_hud()
+		_draw_lucky()
 
 	# floating pickup popups
 	for p in _popups:
@@ -2722,6 +3039,47 @@ func _draw() -> void:
 		var f := clampf((_crash_timer - (CRASH_TIME - 0.15)) / 0.15, 0.0, 1.0)
 		if f > 0.0:
 			draw_rect(Rect2(0, 0, SCREEN_W, _view_h), Color(1, 1, 1, f * 0.6))
+
+
+# Combo chain readout, centred under the coin counter: multiplier text that pops
+# on every chain bump plus a segmented pixel bar draining with the 3s window. The
+# bar turns boost-gold while a ramp boost is freezing the clock, so "paused" is
+# visibly different from "running out".
+func _draw_combo_hud() -> void:
+	if _combo < 2 or _combo_timer <= 0.0:
+		return
+	var cx := _view_w * 0.5
+	var y := 200.0
+	var paused := _boost_timer > 0.0
+	var col := COL_BOOST if paused else COL_COMBO
+	if _ui_font != null:
+		var pop := int(30.0 * (1.0 + _combo_flash * 0.4))
+		draw_string(_ui_font, Vector2(cx - 160.0, y), "COMBO x%d" % _combo, HORIZONTAL_ALIGNMENT_CENTER, 320.0, pop, col)
+	var cells := 10
+	var on_cells := ceili(_combo_timer / COMBO_TIME * float(cells))
+	for i in range(cells):
+		var c := col if i < on_cells else Color(1, 1, 1, 0.15)
+		draw_rect(Rect2(cx - 70.0 + float(i) * 14.0, y + 10.0, 10.0, 8.0), c)
+
+
+# The Lucky Run announcement: a pulsing gold headline plus a thin gold frame
+# around the whole view, alive for the entire run — unmissable, but out of the
+# road's way.
+func _draw_lucky() -> void:
+	if not _lucky_run:
+		return
+	var pulse := 0.75 + 0.25 * sin(time_alive * 6.0)
+	var gc := COL_COIN
+	gc.a = 0.9 * pulse
+	if _ui_font != null:
+		draw_string(_ui_font, Vector2(_view_w * 0.5 - 220.0, 248.0), "LUCKY RUN! 2x COINS", HORIZONTAL_ALIGNMENT_CENTER, 440.0, 30, gc)
+	var fc := COL_COIN
+	fc.a = 0.28 * pulse
+	var th := 6.0
+	draw_rect(Rect2(0, 0, _view_w, th), fc)
+	draw_rect(Rect2(0, _view_h - th, _view_w, th), fc)
+	draw_rect(Rect2(0, th, th, _view_h - 2.0 * th), fc)
+	draw_rect(Rect2(_view_w - th, th, th, _view_h - 2.0 * th), fc)
 
 
 # The jump-the-gap hole: a void that follows the road across its length, with a
@@ -2788,7 +3146,7 @@ func _draw_road() -> void:
 			var hw := road_half_width(d)
 			left.append(Vector2(_sx(c - hw), y))
 			right.append(Vector2(_sx(c + hw), y))
-			vs.append(d / ROAD_TEX_TILE)
+			vs.append(d / WORLD_TEX_TILE)
 			centers.append(Vector3(_sx(c), y, d))
 			y += step
 		_fill_band(left, right, vs)
@@ -2825,7 +3183,7 @@ func _draw_road() -> void:
 		cen0.append(Vector3(_sx(c0), yy, d))
 		cen1.append(Vector3(_sx(c1), yy, d))
 		split.append(1 if absf(c1 - c0) > DASH_SPLIT_EPS else 0)
-		vs.append(d / ROAD_TEX_TILE)
+		vs.append(d / WORLD_TEX_TILE)
 		yy += step
 	_fill_band(l0, r0, vs)
 	_fill_band(l1, r1, vs)
@@ -2836,8 +3194,9 @@ func _draw_road() -> void:
 	_draw_dashes(cen1, split)                 # right-lane centre line, only where it has parted
 
 
-# Fills a road band, textured (tiling along its length via the vs/UV-v values when
-# a road texture is loaded), rainbow-surfaced, or flat-coloured.
+# Fills a road band, textured (world-anchored 256x256 tiling when a road texture
+# is loaded — see _draw_band_strip's world_u mode), rainbow-surfaced, or
+# flat-coloured.
 #
 # All three paths render as ONE indexed triangle strip (two triangles per sample
 # row) instead of one huge concave polygon. draw_colored_polygon ear-clips its
@@ -2848,7 +3207,7 @@ func _draw_road() -> void:
 # triangles, which render as nothing.
 func _fill_band(left: PackedVector2Array, right: PackedVector2Array, vs := PackedFloat32Array()) -> void:
 	if _tex_road != null and vs.size() == left.size() and left.size() == right.size():
-		_draw_band_strip(left, right, Color.WHITE, _tex_road, vs)
+		_draw_band_strip(left, right, Color.WHITE, _tex_road, vs, 0.0, 1.0, true)
 		return
 	if _theme_rainbow:
 		_fill_rainbow(left, right)
@@ -2857,8 +3216,11 @@ func _fill_band(left: PackedVector2Array, right: PackedVector2Array, vs := Packe
 
 
 # The shared strip renderer: rows of (left, right) vertex pairs, two triangles per
-# row gap, optional texture with u across the band (u0->u1) and per-row v.
-func _draw_band_strip(left: PackedVector2Array, right: PackedVector2Array, col: Color, tex: Texture2D = null, vs := PackedFloat32Array(), u0 := 0.0, u1 := 1.0) -> void:
+# row gap, optional texture with per-row v and u either spanning the band (u0->u1
+# — the rainbow surface) or anchored to WORLD x at the fixed 256px tile (world_u —
+# the road surface, so its texture never squashes with the road width and lines up
+# with the identically-tiled background for one cohesive ground plane).
+func _draw_band_strip(left: PackedVector2Array, right: PackedVector2Array, col: Color, tex: Texture2D = null, vs := PackedFloat32Array(), u0 := 0.0, u1 := 1.0, world_u := false) -> void:
 	var n := left.size()
 	if n < 2 or right.size() != n:
 		return
@@ -2871,12 +3233,17 @@ func _draw_band_strip(left: PackedVector2Array, right: PackedVector2Array, col: 
 	var uvs := PackedVector2Array()
 	if use_tex:
 		uvs.resize(n * 2)
+	var wox := camera_x - _view_w * 0.5   # screen-x -> world-x offset (see _sx)
 	for i in range(n):
 		pts[i * 2] = left[i]
 		pts[i * 2 + 1] = right[i]
 		if use_tex:
-			uvs[i * 2] = Vector2(u0, vs[i])
-			uvs[i * 2 + 1] = Vector2(u1, vs[i])
+			if world_u:
+				uvs[i * 2] = Vector2((left[i].x + wox) / WORLD_TEX_TILE, vs[i])
+				uvs[i * 2 + 1] = Vector2((right[i].x + wox) / WORLD_TEX_TILE, vs[i])
+			else:
+				uvs[i * 2] = Vector2(u0, vs[i])
+				uvs[i * 2 + 1] = Vector2(u1, vs[i])
 	RenderingServer.canvas_item_add_triangle_array(
 		get_canvas_item(), _strip_indices(n), pts, cols, uvs,
 		PackedInt32Array(), PackedFloat32Array(),
@@ -3050,28 +3417,30 @@ func _gore_tip(r0: PackedVector2Array, l1: PackedVector2Array, idx: int, dir: in
 	return (r0[nb].lerp(r0[idx], s) + l1[nb].lerp(l1[idx], s)) * 0.5
 
 
-# Off-road background: a per-theme texture tiled with parallax scroll, or the flat
-# theme colour when no texture is present.
+# Off-road background: a per-theme texture tiled 1:1 with the world (same 256px
+# lattice, same scroll as the road surface — no parallax), or the flat theme
+# colour when no texture is present. The offsets are chosen so a background tile
+# corner sits exactly on every WORLD multiple of 256 on both axes, which is the
+# same lattice the road texture's world-anchored UVs sample — one cohesive ground.
 func _draw_background() -> void:
 	if _tex_bg != null:
-		_draw_tiled(_tex_bg, camera_x * BG_TEX_PARALLAX, -distance * BG_TEX_PARALLAX)
+		_draw_tiled(_tex_bg, camera_x - _view_w * 0.5, -(distance + _car_y))
 	else:
 		draw_rect(Rect2(0, 0, SCREEN_W, _view_h), col_offroad)
 
 
-# Tiles a texture across the whole screen at the given world-scroll offset, so it
-# works regardless of the texture's import/repeat flags.
+# Tiles a texture across the whole screen at the given world-scroll offset, each
+# tile drawn at the fixed 256x256 world footprint (whatever the texture's own
+# pixel size or import flags), so ground art always matches the road's scale.
 func _draw_tiled(tex: Texture2D, scroll_x: float, scroll_y: float) -> void:
-	var ts := tex.get_size()
-	if ts.x <= 0.0 or ts.y <= 0.0:
-		return
-	var y := -fposmod(scroll_y, ts.y)
+	var ts := WORLD_TEX_TILE
+	var y := -fposmod(scroll_y, ts)
 	while y < _view_h:
-		var x := -fposmod(scroll_x, ts.x)
+		var x := -fposmod(scroll_x, ts)
 		while x < SCREEN_W:
-			draw_texture(tex, Vector2(x, y))
-			x += ts.x
-		y += ts.y
+			draw_texture_rect(tex, Rect2(x, y, ts, ts), false)
+			x += ts
+		y += ts
 
 
 # Background props: per-theme sprite for the variant, else the primitive stand-in.
@@ -3086,7 +3455,8 @@ func _draw_decos() -> void:
 		if _tex_deco.size() > 0:
 			var tex: Texture2D = _tex_deco[variant % _tex_deco.size()]
 			var sz := tex.get_size() * s
-			draw_circle(pos + SHADOW_OFF, maxf(sz.x, sz.y) * 0.32, SHADOW_COL)
+			# the shadow is the sprite itself tinted, so it hugs the opaque pixels
+			draw_texture_rect(tex, Rect2(pos - sz * 0.5 + SHADOW_OFF, sz), false, SHADOW_COL)
 			draw_texture_rect(tex, Rect2(pos - sz * 0.5, sz), false)
 		else:
 			draw_circle(pos + SHADOW_OFF, 13.0 * s, SHADOW_COL)
