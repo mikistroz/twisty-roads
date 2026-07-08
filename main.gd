@@ -48,7 +48,7 @@ const MIN_HALF_WIDTH := 120.0
 const NARROW_PER_DIST := 0.0007   # road narrows by distance (visible ahead, fair)
 const RAMP_SECONDS := 220.0
 const INTRO_DIST := 800.0         # straight, hazard-free start (short: the first decision comes fast)
-const MAX_STRAIGHT_RUN := 950.0   # it's "Twisty Roads": force a bend if the road runs this straight
+const MAX_STRAIGHT_RUN := 820.0   # it's "Twisty Roads": force a bend if the road runs this straight
 
 # Rhythm curve: periodic "breather" sections where the road widens (speed stays
 # linear — no slowdown).
@@ -69,6 +69,14 @@ const COL_BOOST := Color("ffe27a")
 
 # Resume countdown
 const COUNT_TIME := 3.0
+
+# ---------------- menu attract mode ----------------
+# Behind the menus, a demo driver cruises the last selected theme's road, lazily
+# weaving from edge to edge, under a slight blur (see _build_menu_blur) that keeps
+# the UI readable. It reuses the live world: same track generator, same theme art,
+# same trail VFX — just no hazards, coins or scoring.
+const MENU_DRIVE_SPEED := 300.0   # demo cruise speed (a touch under base speed)
+const MENU_SWAY_SMOOTH := 2.6     # how eagerly the demo driver chases its weave target
 
 # Floating pickup popups
 const POPUP_LIFE := 0.9
@@ -141,18 +149,21 @@ const SHOULDER_CHANCE := 0.4      # chance a branch is a bailout shoulder instea
 const FORK_WAVE_AMP := 8.0        # max sideways wander added across a fork
 const FORK_WAVE_LEN := 820.0      # wavelength of that wander
 const FORK_WAVE_CHANCE := 0.8     # chance a fork winds rather than running straight
-const FORK_ISLAND_CHANCE := 0.22  # chance a fork is a roundabout-style island instead
-const ISLAND_MEDIAN_MULT := 2.3   # islands open a much wider grass middle...
-                                  # ...and run at the minimum fair length, so they read
-                                  # as a compact obstacle you pass around, not a long fork
+const FORK_ISLAND_CHANCE := 0.32  # chance a fork is a roundabout-style island instead
+const ISLAND_MEDIAN_MULT := 2.6   # islands open a much wider grass middle...
+                                  # ...and run at the minimum fair length with fully
+                                  # bowed lanes (ramp 0.5 -> a sine arch, no straight
+                                  # middle), so they read as a proper ROUNDABOUT you
+                                  # sweep around, not a long parallel fork
 
 # ---------------- curated formations ----------------
 # Hand-authored centerline set-pieces stitched into the procedural generation at
 # random intervals: recognizable shapes (slalom gates, a smooth wave, a double
-# hairpin, a long sweeper, a chicane flick) that give the road moments of intent.
+# hairpin, a long sweeper, a chicane flick, a hard zigzag, a tightening spiral,
+# a figure-eight, an orbit bulge) that give the road moments of intent.
 # Each step is {dx: fraction of the formation's amplitude, len: authored segment
 # length}; the whole shape is mirrored at random and scaled by the difficulty ramp.
-const FORMATION_CHANCE := 0.28    # chance a seeded pattern uses a formation instead
+const FORMATION_CHANCE := 0.5     # chance a seeded pattern uses a formation instead
 const FORMATIONS := [
 	{ "name": "slalom", "amp": 185.0, "steps": [
 		{ "dx": 1.0, "len": 185.0 }, { "dx": -1.0, "len": 185.0 }, { "dx": 1.0, "len": 185.0 },
@@ -161,14 +172,38 @@ const FORMATIONS := [
 		{ "dx": 0.7, "len": 210.0 }, { "dx": 1.0, "len": 210.0 }, { "dx": 0.7, "len": 210.0 },
 		{ "dx": 0.0, "len": 210.0 }, { "dx": -0.7, "len": 210.0 }, { "dx": -1.0, "len": 210.0 },
 		{ "dx": -0.7, "len": 210.0 }, { "dx": 0.0, "len": 210.0 } ] },
-	{ "name": "double_hairpin", "amp": 330.0, "steps": [
+	{ "name": "double_hairpin", "amp": 360.0, "steps": [
 		{ "dx": 1.0, "len": 300.0 }, { "dx": 1.0, "len": 200.0 }, { "dx": -1.0, "len": 420.0 },
 		{ "dx": -1.0, "len": 200.0 }, { "dx": 0.0, "len": 320.0 } ] },
-	{ "name": "sweeper", "amp": 300.0, "steps": [
+	{ "name": "sweeper", "amp": 330.0, "steps": [
 		{ "dx": 0.55, "len": 260.0 }, { "dx": 1.0, "len": 300.0 }, { "dx": 1.0, "len": 260.0 },
 		{ "dx": 0.45, "len": 260.0 } ] },
 	{ "name": "chicane_flick", "amp": 210.0, "steps": [
 		{ "dx": 1.0, "len": 170.0 }, { "dx": -1.0, "len": 190.0 }, { "dx": -0.2, "len": 210.0 } ] },
+	# hard zigzag: sharper and longer than the inline zigzag pattern — a sawtooth
+	# of full-amplitude cuts with barely a breath between them
+	{ "name": "zigzag", "amp": 250.0, "steps": [
+		{ "dx": 1.0, "len": 165.0 }, { "dx": -1.0, "len": 165.0 }, { "dx": 1.0, "len": 165.0 },
+		{ "dx": -1.0, "len": 165.0 }, { "dx": 1.0, "len": 165.0 }, { "dx": -1.0, "len": 165.0 },
+		{ "dx": 0.0, "len": 190.0 } ] },
+	# figure-eight: two big opposed loops joined by a hard crossover through the
+	# middle — the road bulges far out one way, whips across, and bulges back out
+	# the other before returning
+	{ "name": "figure_eight", "amp": 360.0, "steps": [
+		{ "dx": 0.85, "len": 220.0 }, { "dx": 1.0, "len": 190.0 }, { "dx": 0.55, "len": 190.0 },
+		{ "dx": -0.55, "len": 210.0 }, { "dx": -1.0, "len": 190.0 }, { "dx": -0.85, "len": 190.0 },
+		{ "dx": 0.0, "len": 230.0 } ] },
+	# spiral: turns that wind progressively tighter — each swing is smaller and
+	# quicker than the last, corkscrewing in before flicking straight
+	{ "name": "spiral", "amp": 330.0, "steps": [
+		{ "dx": 1.0, "len": 300.0 }, { "dx": -0.78, "len": 235.0 }, { "dx": 0.6, "len": 185.0 },
+		{ "dx": -0.44, "len": 145.0 }, { "dx": 0.3, "len": 115.0 }, { "dx": -0.18, "len": 95.0 },
+		{ "dx": 0.0, "len": 130.0 } ] },
+	# orbit: skirt the rim of a circle — swing out, ride the arc, swing home
+	# (the centerline cousin of the island-fork roundabout)
+	{ "name": "orbit", "amp": 300.0, "steps": [
+		{ "dx": 0.9, "len": 180.0 }, { "dx": 1.0, "len": 150.0 }, { "dx": 1.0, "len": 170.0 },
+		{ "dx": 0.9, "len": 150.0 }, { "dx": 0.0, "len": 180.0 } ] },
 ]
 
 # Bailout shoulder: the main road stays full width and a narrower coin lane
@@ -264,6 +299,16 @@ const DECO_VARIANTS := 3          # number of primitive prop shapes / sprite slo
 
 const COL_BLOCK := Color("f4c20d")
 const COL_BLOCK_DARK := Color("141414")
+# Barrier styling: blocks have no sprite slot, so they're drawn as a proper piece
+# of street furniture — a warning-yellow board on dark feet with a SYMMETRIC
+# mirrored stripe pattern and blinking end lamps. The stripe count per half is
+# FIXED (repeats, not a per-20px fill), so a barrier of any random width carries
+# the same uniform pattern, just scaled.
+const BLOCK_STRIPES := 3          # stripe repeats per half, mirrored about the centre
+const COL_BLOCK_HI := Color("ffe08a")     # top lip highlight
+const COL_BLOCK_SHADE := Color("b88d07")  # bottom lip shade
+const COL_BLOCK_LAMP := Color("ffb03a")   # end lamp, lit phase
+const COL_BLOCK_LAMP_OFF := Color("7a2717")  # end lamp, dark phase
 const COL_TRAFFIC := Color("e74c3c")
 const COL_TRAFFIC_DARK := Color("7b241c")
 const COL_OIL := Color(0.02, 0.02, 0.05, 0.72)
@@ -297,7 +342,10 @@ const VFX := {
 	"smoke":      { "layers": [SPRAY_SMOKE] },
 	"smoke_dust": { "layers": [SPRAY_SMOKE, SPRAY_DUST] },
 	"smoke_sand": { "layers": [SPRAY_SMOKE, SPRAY_SAND] },
-	"smoke_mud":  { "layers": [SPRAY_SMOKE, SPRAY_MUD] },
+	# mud_bike = the enduro bike: same smoke+mud spray, but kicked from a SINGLE
+	# rear wheel, plus a continuous one-line oil groove along the path (see
+	# _emit_trail / _draw_oil_trail)
+	"mud_bike":   { "layers": [SPRAY_SMOKE, SPRAY_MUD] },
 	"smoke_snow": { "layers": [SPRAY_SMOKE, SPRAY_SNOW] },
 	"wake":       { "layers": [SPRAY_SPLASH] },
 	"taillight":  { "layers": [] },
@@ -310,6 +358,13 @@ const COL_WAKE := Color("dff6ff")
 const WAKE_LEN := 230.0                  # how far back (world px) the wake reaches
 const WAKE_MAX_PTS := 64
 const WAKE_SPREAD := 30.0                # extra half-spread the streaks gain at the tail
+# The mud enduro bike rides on ONE wheel track, so instead of twin marks it drips
+# a single oily groove along its actual path: a dark core in a wider wet smear,
+# with a faint violet sheen on the freshest stretch (oil-slick shimmer).
+const COL_OILTRAIL := Color(0.07, 0.06, 0.09)
+const COL_OILTRAIL_SHEEN := Color(0.52, 0.42, 0.66)
+const OILTRAIL_LEN := 260.0              # how far back (world px) the groove reaches
+const OILTRAIL_MAX_PTS := 72
 
 # ---------------- object shadows ----------------
 # Soft offset drop shadows under everything that sits ON the road/terrain, so
@@ -321,6 +376,13 @@ const SHADOW_OFF := Vector2(5.0, 7.0)
 const CRASH_TIME := 1.0
 const COL_SPEED_MAX := Color("ff5a5f")
 const COL_SPEED := Color("e8e8e8")
+# Brief screen shake on impact: the whole WORLD node jolts (the HUD lives on a
+# CanvasLayer, so it stays put) with an amplitude that decays quadratically.
+# DRAW_PAD over-paints every full-screen surface by the max shake offset, so the
+# jolt never exposes a bare strip of clear-colour at the edges.
+const SHAKE_TIME := 0.45
+const SHAKE_AMP := 14.0
+const DRAW_PAD := 16.0
 
 # ---------------- speedometer gauge ----------------
 # Rendered retro-instrument style: a ring of chunky PIX-snapped segments that
@@ -387,7 +449,7 @@ const THEMES := {
 	"jdm":       { "name": "JDM",          "price": 850,  "offroad": "0d1b2a", "road": "23272e", "edge": "f72585", "dash": "4cc9f0", "stripes": true,  "car": "e6552a", "car_dark": "a83419", "vehicle": "Toyota Supra",     "enemy": "Mazda Miata",       "vfx": "smoke" },
 	"jetski":    { "name": "Jetski Escape","price": 1000, "offroad": "e3c98f", "road": "1f7a8c", "edge": "9be7ff", "dash": "ffffff", "stripes": false, "car": "ff5252", "car_dark": "b71c1c", "vehicle": "Jetski",          "enemy": "Jetskis",           "vfx": "wake" },
 	"sand":      { "name": "Sand Rally",   "price": 1150, "offroad": "c2954e", "road": "9c7a3c", "edge": "e8d6a0", "dash": "ffffff", "stripes": false, "car": "2e7d32", "car_dark": "1b5e20", "vehicle": "Rally buggy",      "enemy": "Porsche Safari",    "vfx": "smoke_sand" },
-	"mud":       { "name": "Mud Sprint",   "price": 1300, "offroad": "3b5323", "road": "5b432a", "edge": "8a6d3b", "dash": "ffffff", "stripes": false, "car": "d32f2f", "car_dark": "9a1f1f", "vehicle": "Enduro bike",      "enemy": "Enduro bikes",      "vfx": "smoke_mud" },
+	"mud":       { "name": "Mud Sprint",   "price": 1300, "offroad": "3b5323", "road": "5b432a", "edge": "8a6d3b", "dash": "ffffff", "stripes": false, "car": "d32f2f", "car_dark": "9a1f1f", "vehicle": "Enduro bike",      "enemy": "Enduro bikes",      "vfx": "mud_bike" },
 	"rainbow":   { "name": "Rainbow Lane", "price": 1500, "offroad": "0b0b2a", "road": "3a2f5e", "edge": "ff5ec7", "dash": "ffffff", "stripes": true,  "car": "ffeb3b", "car_dark": "fbc02d", "vehicle": "Kart",            "enemy": "Karts",             "vfx": "smoke" },
 	"frostbite": { "name": "Frostbite Run","price": 1800, "offroad": "dfe9f0", "road": "8fa8bf", "edge": "5b86b0", "dash": "ffffff", "stripes": false, "car": "455a64", "car_dark": "263238", "vehicle": "Ford F-150",      "enemy": "Porsche Cayenne",   "vfx": "smoke_snow" },
 }
@@ -522,6 +584,7 @@ var _tex_bg: Texture2D
 var _tex_car: Texture2D
 var _tex_enemy: Array[Texture2D] = []
 var _tex_deco: Array[Texture2D] = []
+var _tex_logo: Texture2D           # menu logo art (slot "logo"); null = drawn fallback
 # Built once, theme-independent: the Rainbow Lane stripe palette (see _fill_rainbow).
 var _tex_rainbow: ImageTexture
 # Cached triangle-strip index buffer for the road-band renderer (see _strip_indices).
@@ -574,14 +637,19 @@ var _taillights: Array[Vector3] = []
 # Wake history (jetski): one (hull wx, unused, wd) sample per frame, drawn as two
 # spreading foam streaks along the real path (see _draw_wake).
 var _wake: Array[Vector3] = []
+# Oil-groove history (mud enduro bike): one (rear-wheel wx, unused, wd) sample per
+# frame, drawn as a SINGLE dark oily line along the real path (see _draw_oil_trail).
+var _oil_trail: Array[Vector3] = []
 var _oil_timer := 0.0
 var _air_timer := 0.0
 var _boost_timer := 0.0
 var _boost_warned := false         # has the "boost ending" cue fired for this boost?
 var _crash_timer := 0.0
+var _shake_t := 0.0                # crash screen-shake time remaining
 var _count_timer := 0.0
 var _popups: Array = []
 var _ui_font: Font
+var _menu_time := 0.0              # attract-mode clock (drives the weave + logo wobble)
 
 # combo chain state (see the COMBO constants)
 var _combo := 0                    # actions in the current chain (1 = chain armed)
@@ -627,6 +695,8 @@ var _challenges: Control
 var _hud: Control
 var _pause: Control
 var _gameover: Control
+var _menu_blur: ColorRect          # slight screen blur between the attract drive and the menus
+var _logo: Control                 # the wobbling title logo (see _draw_logo)
 var _menu_coins: Label
 var _store_coins: Label
 var _theme_buttons := {}
@@ -788,6 +858,7 @@ func _load_theme_art(id: String) -> void:
 	_tex_car = _load_tex(id, "car")
 	_tex_enemy = _load_tex_list(id, "enemy")
 	_tex_deco = _load_tex_list(id, "deco")
+	_tex_logo = _load_tex(id, "logo")
 	# Derive the aspect-true draw size of every vehicle sprite, then its collision
 	# box from the opaque content WITHIN that size, clamped down to the canonical
 	# footprint so generation fairness is preserved (see _pl_hw note).
@@ -943,16 +1014,149 @@ func _update_engine_audio() -> void:
 # ============================================================
 #  UI
 # ============================================================
+# Bubbly pixel button: a rounded-pixel slab floating over its own base and soft
+# shadow, gently bobbing on a per-button phase. PRESS & HOLD sinks the slab onto
+# the base (the shadow tightens underneath); PRESS & COMPLETE (release inside)
+# fires the action with a squash-and-pop bounce; release outside just floats it
+# back up — a visible cancel. Built on BaseButton, so all press/disable/signal
+# behaviour is stock and every pixel of the look is drawn here.
+class PixelButton extends BaseButton:
+	const COL_OUTLINE := Color("141414")
+	const COL_SHADOW := Color(0.0, 0.0, 0.0, 0.28)
+	const LIFT := 7.0                # how high the slab floats above its base
+
+	var text := "":
+		set(v):
+			text = v
+			queue_redraw()
+	var base_col := Color("e8433f"):
+		set(v):
+			base_col = v
+			queue_redraw()
+	var font: Font
+	var font_size := 40
+
+	var _t := randf() * TAU          # bob phase — randomised so buttons never sync
+	var _hold := 0.0                 # 0 = floating, 1 = fully sunk (press & hold)
+	var _pop := 0.0                  # 1 -> 0 after a completed press (the bounce)
+
+	func _init() -> void:
+		focus_mode = Control.FOCUS_NONE   # SPACE steers the car; it must never re-fire a button
+
+	func _process(delta: float) -> void:
+		if not is_visible_in_tree():
+			return
+		_t += delta
+		_hold = move_toward(_hold, 1.0 if button_pressed else 0.0, delta * 14.0)
+		_pop = maxf(_pop - delta * 3.2, 0.0)
+		queue_redraw()
+
+	func _pressed() -> void:
+		_pop = 1.0   # press completed: bounce
+
+	func _draw() -> void:
+		var sz := size
+		var bob := 0.0 if disabled else sin(_t * 2.2) * 3.0
+		var squash := sin(_pop * PI)
+		# squash about the centre: wider and flatter at the bounce's peak
+		draw_set_transform(sz * 0.5 + Vector2(0.0, bob), 0.0, Vector2(1.0 + 0.06 * squash, 1.0 - 0.08 * squash))
+		var w := sz.x
+		var h := sz.y - LIFT
+		var sink := _hold * (LIFT - 1.0)
+		var slab := Rect2(-w * 0.5, -sz.y * 0.5 + sink, w, h)
+		var base := Rect2(-w * 0.5, -sz.y * 0.5 + LIFT, w, h)
+		var body := base_col
+		if disabled:
+			body = base_col.darkened(0.25)
+		elif is_hovered():
+			body = base_col.lightened(0.08)
+		# floating shadow: pinned to the panel (counter-bob) and tightening as the
+		# slab sinks, so height reads even before anything moves
+		var sh := base
+		sh.position += Vector2(4.0, 9.0 - bob) * (1.0 - _hold * 0.55)
+		_bubble(sh, COL_SHADOW)
+		_bubble(base.grow(3.0), COL_OUTLINE)
+		_bubble(base, base_col.darkened(0.5))
+		_bubble(slab.grow(3.0), COL_OUTLINE)
+		_bubble(slab, body)
+		# top light + a corner shine speck sell the "bubble"
+		draw_rect(Rect2(slab.position.x + 12.0, slab.position.y + 4.0, slab.size.x - 24.0, 5.0), body.lightened(0.33))
+		draw_rect(Rect2(slab.position.x + 12.0, slab.position.y + 12.0, 14.0, 5.0), Color(1, 1, 1, 0.5))
+		if font != null and text != "":
+			var tcol := Color(1, 1, 1, 0.75 if disabled else 0.97)
+			var slab_cy := slab.position.y + slab.size.y * 0.5
+			var by := slab_cy - font.get_height(font_size) * 0.5 + font.get_ascent(font_size)
+			draw_string(font, Vector2(-w * 0.5 + 2.0, by + 3.0), text, HORIZONTAL_ALIGNMENT_CENTER, w, font_size, Color(0, 0, 0, 0.55))
+			draw_string(font, Vector2(-w * 0.5, by), text, HORIZONTAL_ALIGNMENT_CENTER, w, font_size, tcol)
+
+	# A rect with stepped two-radius corners — round enough to read bubbly, chunky
+	# enough to stay pixel-art.
+	func _bubble(r: Rect2, col: Color) -> void:
+		var c1 := minf(10.0, r.size.y * 0.24)
+		var c2 := minf(4.0, c1 * 0.5)
+		draw_rect(Rect2(r.position.x + c1, r.position.y, r.size.x - 2.0 * c1, c2), col)
+		draw_rect(Rect2(r.position.x + c2, r.position.y + c2, r.size.x - 2.0 * c2, c1 - c2), col)
+		draw_rect(Rect2(r.position.x, r.position.y + c1, r.size.x, r.size.y - 2.0 * c1), col)
+		draw_rect(Rect2(r.position.x + c2, r.end.y - c1, r.size.x - 2.0 * c2, c1 - c2), col)
+		draw_rect(Rect2(r.position.x + c1, r.end.y - c2, r.size.x - 2.0 * c1, c2), col)
+
+
+# The slight blur between the attract-mode drive and the menu UI: a full-screen
+# ColorRect whose shader samples the already-drawn frame (the world lives on the
+# canvas below this CanvasLayer) with a small 9-tap gaussian, then pulls it a
+# touch toward a dark tone — softened and dimmed just enough that the pixel-art
+# drive reads as a backdrop and the white UI text stays readable on any theme.
+func _build_menu_blur(layer: CanvasLayer) -> void:
+	var sh := Shader.new()
+	sh.code = """
+shader_type canvas_item;
+
+uniform sampler2D screen_tex : hint_screen_texture, filter_linear;
+uniform float blur_px = 2.4;
+uniform float scrim = 0.30;
+
+void fragment() {
+	vec2 px = SCREEN_PIXEL_SIZE * blur_px;
+	vec3 c = texture(screen_tex, SCREEN_UV).rgb * 0.22;
+	c += texture(screen_tex, SCREEN_UV + vec2( px.x, 0.0)).rgb * 0.11;
+	c += texture(screen_tex, SCREEN_UV + vec2(-px.x, 0.0)).rgb * 0.11;
+	c += texture(screen_tex, SCREEN_UV + vec2(0.0,  px.y)).rgb * 0.11;
+	c += texture(screen_tex, SCREEN_UV + vec2(0.0, -px.y)).rgb * 0.11;
+	c += texture(screen_tex, SCREEN_UV + vec2( px.x,  px.y)).rgb * 0.085;
+	c += texture(screen_tex, SCREEN_UV + vec2( px.x, -px.y)).rgb * 0.085;
+	c += texture(screen_tex, SCREEN_UV + vec2(-px.x,  px.y)).rgb * 0.085;
+	c += texture(screen_tex, SCREEN_UV + vec2(-px.x, -px.y)).rgb * 0.085;
+	COLOR = vec4(mix(c, vec3(0.03, 0.03, 0.05), scrim), 1.0);
+}
+"""
+	var mat := ShaderMaterial.new()
+	mat.shader = sh
+	_menu_blur = ColorRect.new()
+	_menu_blur.material = mat
+	_menu_blur.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_menu_blur.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer.add_child(_menu_blur)
+
+
 func _build_ui() -> void:
 	var layer := CanvasLayer.new()
 	add_child(layer)
+	_build_menu_blur(layer)   # first child: blurs the world, sits under every panel
 
 	_menu = _make_panel(layer)
-	_make_label(_menu, "TWISTY\nROADS", Vector2(0, 140), Vector2(SCREEN_W, 200), 80)
+	# the title logo: art slot "logo" if shipped, else the drawn wordmark — either
+	# way it hangs on this control, which _update_attract rocks gently (the wobble)
+	_logo = Control.new()
+	_logo.position = Vector2(40, 96)
+	_logo.size = Vector2(SCREEN_W - 80.0, 260)
+	_logo.pivot_offset = _logo.size * 0.5
+	_logo.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_logo.draw.connect(_draw_logo)
+	_menu.add_child(_logo)
 	_menu_coins = _make_label(_menu, "Coins: 0", Vector2(0, 420), Vector2(SCREEN_W, 60), 40)
 	_make_button(_menu, "PLAY", Vector2(180, 540), Vector2(360, 96), 46).pressed.connect(_start_run)
-	_make_button(_menu, "STORE", Vector2(180, 656), Vector2(360, 96), 46).pressed.connect(_open_store)
-	_make_button(_menu, "CHALLENGES", Vector2(180, 772), Vector2(360, 96), 38).pressed.connect(_open_challenges)
+	_make_button(_menu, "STORE", Vector2(180, 656), Vector2(360, 96), 46, Color("f2a007")).pressed.connect(_open_store)
+	_make_button(_menu, "CHALLENGES", Vector2(180, 772), Vector2(360, 96), 38, Color("2fa7c7")).pressed.connect(_open_challenges)
 	_make_label(_menu, "Hold anywhere to steer left, release to drift right", Vector2(20, 920), Vector2(SCREEN_W - 40, 60), 26)
 
 	_store = _make_panel(layer)
@@ -960,11 +1164,11 @@ func _build_ui() -> void:
 	_store_coins = _make_label(_store, "Coins: 0", Vector2(0, 140), Vector2(SCREEN_W, 50), 34)
 	var sy := 210.0
 	for id in THEME_ORDER:
-		var b := _make_button(_store, "", Vector2(70, sy), Vector2(580, 74), 24)
+		var b := _make_button(_store, "", Vector2(70, sy), Vector2(580, 74), 24, Color("3a4252"))
 		b.pressed.connect(_on_theme_pressed.bind(id))
 		_theme_buttons[id] = b
 		sy += 84.0
-	_make_button(_store, "BACK", Vector2(180, sy + 6.0), Vector2(360, 78), 36).pressed.connect(_goto_menu)
+	_make_button(_store, "BACK", Vector2(180, sy + 6.0), Vector2(360, 78), 36, Color("5a6474")).pressed.connect(_goto_menu)
 
 	_challenges = _make_panel(layer)
 	_make_label(_challenges, "CHALLENGES", Vector2(0, 50), Vector2(SCREEN_W, 80), 56)
@@ -988,19 +1192,19 @@ func _build_ui() -> void:
 		lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		vb.add_child(lbl)
 		_challenge_labels.append(lbl)
-	_make_button(_challenges, "BACK", Vector2(180, 1090), Vector2(360, 90), 40).pressed.connect(_goto_menu)
+	_make_button(_challenges, "BACK", Vector2(180, 1090), Vector2(360, 90), 40, Color("5a6474")).pressed.connect(_goto_menu)
 
 	_hud = _make_panel(layer)
 	_hud_score = _make_label(_hud, "0", Vector2(0, 36), Vector2(SCREEN_W, 80), 64)
 	_hud_coins = _make_label(_hud, "Coins: 0", Vector2(0, 124), Vector2(SCREEN_W, 50), 34)
 	_hud_prompt = _make_label(_hud, "Tap to begin\nHold to steer", Vector2(0, 540), Vector2(SCREEN_W, 200), 52)
-	_make_button(_hud, "II", Vector2(600, 30), Vector2(96, 72), 40).pressed.connect(_pause_game)
+	_make_button(_hud, "II", Vector2(600, 30), Vector2(96, 72), 40, Color("5a6474")).pressed.connect(_pause_game)
 
 	_pause = _make_panel(layer)
 	_make_label(_pause, "PAUSED", Vector2(0, 360), Vector2(SCREEN_W, 90), 64)
-	_make_button(_pause, "RESUME", Vector2(180, 520), Vector2(360, 96), 46).pressed.connect(_resume)
-	_make_button(_pause, "RESTART", Vector2(180, 636), Vector2(360, 96), 46).pressed.connect(_start_run)
-	_make_button(_pause, "MENU", Vector2(180, 752), Vector2(360, 96), 40).pressed.connect(_goto_menu)
+	_make_button(_pause, "RESUME", Vector2(180, 520), Vector2(360, 96), 46, Color("43b04a")).pressed.connect(_resume)
+	_make_button(_pause, "RESTART", Vector2(180, 636), Vector2(360, 96), 46, Color("f2a007")).pressed.connect(_start_run)
+	_make_button(_pause, "MENU", Vector2(180, 752), Vector2(360, 96), 40, Color("5a6474")).pressed.connect(_goto_menu)
 
 	_gameover = _make_panel(layer)
 	_make_label(_gameover, "GAME OVER", Vector2(0, 280), Vector2(SCREEN_W, 90), 64)
@@ -1008,7 +1212,73 @@ func _build_ui() -> void:
 	_go_coins = _make_label(_gameover, "Coins earned: 0", Vector2(0, 468), Vector2(SCREEN_W, 60), 36)
 	_go_challenge = _make_label(_gameover, "", Vector2(30, 540), Vector2(SCREEN_W - 60, 90), 28)
 	_make_button(_gameover, "RESTART", Vector2(180, 660), Vector2(360, 100), 48).pressed.connect(_start_run)
-	_make_button(_gameover, "MENU", Vector2(180, 790), Vector2(360, 90), 40).pressed.connect(_goto_menu)
+	_make_button(_gameover, "MENU", Vector2(180, 790), Vector2(360, 90), 40, Color("5a6474")).pressed.connect(_goto_menu)
+
+
+# The menu logo, drawn on the _logo control. A shipped res://art/<theme>/logo.png
+# (or art/default/logo.png) is used as-is, fitted with its aspect kept; otherwise a
+# stylized wordmark is drawn: "TWISTY" as chunky red letters with a thick dark
+# outline, each rocking on its own beat, over "ROADS" as asphalt-grey letters each
+# carrying a yellow centre-line dash — tiny roads. The whole control also sways
+# (rotation set in _update_attract): the logo's slight wobble.
+func _draw_logo() -> void:
+	if _tex_logo != null:
+		var ts := _tex_logo.get_size()
+		if ts.x > 0.0 and ts.y > 0.0:
+			var s := minf(_logo.size.x / ts.x, _logo.size.y / ts.y)
+			var sz := ts * s
+			_logo.draw_texture_rect(_tex_logo, Rect2((_logo.size - sz) * 0.5, sz), false)
+		return
+	if _ui_font == null:
+		return
+	_draw_logo_word("TWISTY", 118, 112.0, 6.0, Color("e02828"), Color("141414"), true)
+	_draw_logo_word("ROADS", 88, 222.0, 12.0, Color("9aa1ab"), Color("17181c"), false)
+
+
+# One line of the drawn wordmark, centred in the logo control. jumble=true gives
+# each letter a fixed alternating tilt plus a slow rock and bob (the playful red
+# line); jumble=false keeps the letters near-still with a road dash through each.
+func _draw_logo_word(word: String, fs: int, baseline: float, tracking: float, fill: Color, outline: Color, jumble: bool) -> void:
+	var widths := PackedFloat32Array()
+	var total := 0.0
+	for i in range(word.length()):
+		var w := _ui_font.get_string_size(word[i], HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
+		widths.append(w)
+		total += w
+	total += tracking * float(word.length() - 1)
+	var x := (_logo.size.x - total) * 0.5
+	for i in range(word.length()):
+		var ch := word[i]
+		var cw := widths[i]
+		var rot := 0.0
+		var bob := 0.0
+		if jumble:
+			rot = (0.055 if i % 2 == 0 else -0.05) + sin(_menu_time * 2.3 + float(i) * 1.7) * 0.045
+			bob = sin(_menu_time * 2.9 + float(i) * 1.1) * 3.0
+		else:
+			bob = sin(_menu_time * 2.1 + float(i) * 0.9) * 1.4
+		_logo.draw_set_transform(Vector2(x + cw * 0.5, baseline + bob), rot, Vector2.ONE)
+		var org := Vector2(-cw * 0.5, 0.0)
+		# every pass is drawn 4x on a 2px lattice: DotGothic's thin strokes become
+		# the fat slab letters the logo wants (a cheap faux-bold)
+		var bold := [Vector2(0, 0), Vector2(2, 0), Vector2(0, 2), Vector2(2, 2)]
+		# chunky drop shadow, an 8-direction outline, then the fill
+		for bd: Vector2 in bold:
+			_logo.draw_char(_ui_font, org + Vector2(8, 8) + bd, ch, fs, Color(0, 0, 0, 0.8))
+		for off in [Vector2(-5, 0), Vector2(5, 0), Vector2(0, -5), Vector2(0, 5),
+				Vector2(-4, -4), Vector2(4, -4), Vector2(-4, 4), Vector2(4, 4)]:
+			for bd: Vector2 in bold:
+				_logo.draw_char(_ui_font, org + off + bd, ch, fs, outline)
+		for bd: Vector2 in bold:
+			_logo.draw_char(_ui_font, org + bd, ch, fs, fill)
+		if jumble:
+			# a white speck of light on each letter's shoulder
+			_logo.draw_rect(Rect2(org.x + cw * 0.16, -fs * 0.62, cw * 0.24, 6.0), Color(1, 1, 1, 0.85))
+		else:
+			# the yellow centre-line dash that makes each grey letter a tiny road
+			_logo.draw_rect(Rect2(org.x + cw * 0.22, -fs * 0.34, cw * 0.5, 5.0), Color("f2c14e"))
+		x += cw + tracking
+	_logo.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
 func _make_panel(layer: CanvasLayer) -> Control:
@@ -1036,14 +1306,14 @@ func _make_label(parent: Control, text: String, pos: Vector2, size: Vector2, fsi
 	return l
 
 
-func _make_button(parent: Control, text: String, pos: Vector2, size: Vector2, fsize: int) -> Button:
-	var b := Button.new()
+func _make_button(parent: Control, text: String, pos: Vector2, size: Vector2, fsize: int, col := Color("e8433f")) -> PixelButton:
+	var b := PixelButton.new()
+	b.font = _ui_font
+	b.font_size = fsize
 	b.text = text
+	b.base_col = col
 	b.position = pos
 	b.size = size
-	b.add_theme_font_size_override("font_size", fsize)
-	if _ui_font != null:
-		b.add_theme_font_override("font", _ui_font)
 	b.pressed.connect(func(): _play_sfx(_sfx_ui))
 	parent.add_child(b)
 	return b
@@ -1056,6 +1326,7 @@ func _show_screen() -> void:
 	_hud.visible = state == State.PLAYING or state == State.CRASH or state == State.COUNTDOWN
 	_pause.visible = state == State.PAUSED
 	_gameover.visible = state == State.GAME_OVER
+	_menu_blur.visible = _in_menu_state()
 
 
 # ============================================================
@@ -1072,6 +1343,8 @@ func _reset_world() -> void:
 	_boost_timer = 0.0
 	_boost_warned = false
 	_crash_timer = 0.0
+	_shake_t = 0.0
+	position = Vector2.ZERO
 	_count_timer = 0.0
 	_bias = 0.0
 	_coins.clear()
@@ -1083,6 +1356,7 @@ func _reset_world() -> void:
 	_popups.clear()
 	_taillights.clear()
 	_wake.clear()
+	_oil_trail.clear()
 	_combo = 0
 	_combo_timer = 0.0
 	_combo_flash = 0.0
@@ -1182,6 +1456,7 @@ func _crash() -> void:
 		return
 	state = State.CRASH
 	_crash_timer = CRASH_TIME
+	_shake_t = SHAKE_TIME
 	Input.vibrate_handheld(220)
 	_spawn_explosion(car_x, distance)   # world-anchored: plays where the car hit
 	_engine_low.stop()
@@ -1264,7 +1539,7 @@ func _on_theme_pressed(id: String) -> void:
 func _refresh_store() -> void:
 	_store_coins.text = "Coins: %d" % coins_total
 	for id in THEME_ORDER:
-		var b: Button = _theme_buttons[id]
+		var b: PixelButton = _theme_buttons[id]
 		var t: Dictionary = THEMES[id]
 		var label: String = t["name"]
 		if not owned.has(id):
@@ -1275,6 +1550,8 @@ func _refresh_store() -> void:
 			label += "   -   Owned"
 		b.text = label
 		b.disabled = selected == id
+		# the equipped theme's row sits gold instead of greying out
+		b.base_col = Color("caa53d") if selected == id else Color("3a4252")
 
 
 func _refresh_challenges() -> void:
@@ -1346,12 +1623,55 @@ func _process(delta: float) -> void:
 	elif state == State.CRASH:
 		_update_crash(delta)
 		queue_redraw()
+	elif _in_menu_state():
+		_update_attract(delta)
+		queue_redraw()
+
+
+func _in_menu_state() -> bool:
+	return state == State.MENU or state == State.STORE or state == State.CHALLENGES
+
+
+# The menus' living background: a demo driver cruising the selected theme's road,
+# weaving lazily from one edge to the other (two blended sines, so the sway never
+# looks metronomic). It advances the same world the game plays in — track, forks,
+# decorations, trail VFX — but seeds no hazards or coins, and _reset_world wipes
+# it all when a real run starts.
+func _update_attract(delta: float) -> void:
+	_menu_time += delta
+	time_alive += delta            # drives the shared shimmer/pulse animations
+	var prev := car_x
+	distance += MENU_DRIVE_SPEED * delta
+	_ensure_track(distance + _gen_ahead)
+	_ensure_branches(distance + _gen_ahead)
+	_ensure_decos(distance + _gen_ahead)
+	_drop_old()
+	var sway := sin(_menu_time * 1.1) * 0.8 + sin(_menu_time * 0.47 + 1.3) * 0.2
+	var target := road_center(distance) + sway * maxf(road_half_width(distance) - COL_HALF_W - 30.0, 0.0) * 0.85
+	target = _clamp_to_nearest_lane(distance, target)
+	car_x = lerpf(car_x, target, clampf(MENU_SWAY_SMOOTH * delta, 0.0, 1.0))
+	lateral_velocity = clampf((car_x - prev) / maxf(delta, 0.0001), -STEER_SPEED, STEER_SPEED)
+	camera_x = lerpf(camera_x, car_x, clampf(CAM_FOLLOW * 0.7 * delta, 0.0, 1.0))
+	camera_x = clampf(camera_x, car_x - CAM_MAX_OFF, car_x + CAM_MAX_OFF)
+	_emit_trail(delta)
+	_update_particles(delta)
+	# the logo's slight wobble: a slow sway plus per-letter life inside _draw_logo
+	if _logo != null and _menu.visible:
+		_logo.rotation = sin(_menu_time * 1.7) * 0.04
+		_logo.queue_redraw()
 
 
 func _update_crash(delta: float) -> void:
 	_crash_timer -= delta
 	_update_boom(delta)
 	_update_particles(delta)
+	# brief screen shake: jolt the world node, decaying quadratically to rest
+	if _shake_t > 0.0:
+		_shake_t = maxf(_shake_t - delta, 0.0)
+		var k := _shake_t / SHAKE_TIME
+		position = Vector2(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * SHAKE_AMP * k * k
+		if _shake_t <= 0.0:
+			position = Vector2.ZERO
 	if _crash_timer <= 0.0:
 		_game_over()
 
@@ -1438,8 +1758,12 @@ func _update_play(delta: float) -> void:
 		car_x += lateral_velocity * delta
 
 	if _oil_timer > 0.0:
-		_tire_marks.append({ "d": distance, "x": car_x - 12.0, "age": 0.0 })
-		_tire_marks.append({ "d": distance, "x": car_x + 12.0, "age": 0.0 })
+		if _theme_vfx == "mud_bike":
+			# the bike skids on its single wheel track
+			_tire_marks.append({ "d": distance, "x": car_x, "age": 0.0 })
+		else:
+			_tire_marks.append({ "d": distance, "x": car_x - 12.0, "age": 0.0 })
+			_tire_marks.append({ "d": distance, "x": car_x + 12.0, "age": 0.0 })
 
 	_emit_trail(delta)
 	_update_particles(delta)
@@ -1876,6 +2200,13 @@ func _emit_trail(delta: float) -> void:
 		_wake.append(Vector3(car_x, 0.0, distance - CAR_HALF_H * 0.8))
 		while _wake.size() > WAKE_MAX_PTS or (_wake.size() > 0 and _wake[0].z < distance - WAKE_LEN):
 			_wake.remove_at(0)
+	if _theme_vfx == "mud_bike":
+		# the enduro bike's single rear wheel: record its path as ONE oily groove
+		# (drawn in _draw_oil_trail); the smoke/mud spray below still runs, kicked
+		# from the same single wheel instead of a car's pair.
+		_oil_trail.append(Vector3(car_x, 0.0, distance - CAR_HALF_H * 0.85))
+		while _oil_trail.size() > OILTRAIL_MAX_PTS or (_oil_trail.size() > 0 and _oil_trail[0].z < distance - OILTRAIL_LEN):
+			_oil_trail.remove_at(0)
 	var fx: Dictionary = VFX.get(_theme_vfx, VFX["smoke"])
 	var interval := 0.09 if _theme_vfx == "wake" else 0.04
 	_exhaust_accum += delta
@@ -1888,10 +2219,15 @@ func _emit_trail(delta: float) -> void:
 			var wx := car_x + randf_range(-6.0, 6.0)
 			var vel := Vector2(randf_range(-14.0, 14.0), randf_range(36.0, 70.0))
 			if bool(layer["wheels"]):
-				# terrain kick: from one rear wheel, flung slightly outward
-				var side := -1.0 if randf() < 0.5 else 1.0
-				wx = car_x + side * CAR_HALF_W * 0.7
-				vel = Vector2(side * randf_range(8.0, 34.0), randf_range(50.0, 90.0))
+				if _theme_vfx == "mud_bike":
+					# a bike has ONE rear wheel: kick terrain from the centre line
+					wx = car_x + randf_range(-3.0, 3.0)
+					vel = Vector2(randf_range(-30.0, 30.0), randf_range(50.0, 90.0))
+				else:
+					# terrain kick: from one rear wheel, flung slightly outward
+					var side := -1.0 if randf() < 0.5 else 1.0
+					wx = car_x + side * CAR_HALF_W * 0.7
+					vel = Vector2(side * randf_range(8.0, 34.0), randf_range(50.0, 90.0))
 			_particles.append({
 				"wx": wx, "wd": distance - CAR_HALF_H * 0.75,
 				"off": Vector2.ZERO, "vel": vel,
@@ -1920,9 +2256,14 @@ func _emit_enemy_fx(ex: float, ed: float) -> void:
 	var wx := ex + randf_range(-5.0, 5.0)
 	var vel := Vector2(randf_range(-12.0, 12.0), randf_range(-60.0, -30.0))
 	if bool(layer["wheels"]):
-		var side := -1.0 if randf() < 0.5 else 1.0
-		wx = ex + side * TRAFFIC_W * 0.34
-		vel = Vector2(side * randf_range(8.0, 30.0), randf_range(-80.0, -45.0))
+		if _theme_vfx == "mud_bike":
+			# enemy enduro bikes ride a single wheel track too
+			wx = ex + randf_range(-3.0, 3.0)
+			vel = Vector2(randf_range(-26.0, 26.0), randf_range(-80.0, -45.0))
+		else:
+			var side := -1.0 if randf() < 0.5 else 1.0
+			wx = ex + side * TRAFFIC_W * 0.34
+			vel = Vector2(side * randf_range(8.0, 30.0), randf_range(-80.0, -45.0))
 	var cols: Array = layer["cols"]
 	_particles.append({
 		"wx": wx, "wd": ed + TRAFFIC_H * 0.4,
@@ -2004,6 +2345,43 @@ func _draw_wake() -> void:
 	draw_polyline_colors(rpts, wash, 9.0, true)
 	draw_polyline_colors(lpts, cols, 3.5, true)
 	draw_polyline_colors(rpts, cols, 3.5, true)
+
+
+# The mud bike's oil groove: the single recorded wheel path drawn as one dark
+# line — a wide wet smear under a narrow near-black core (same two-pass trick as
+# the other trails), plus a faint violet sheen over the freshest stretch so it
+# reads as oil rather than a plain shadow.
+func _draw_oil_trail() -> void:
+	var n := _oil_trail.size()
+	if n < 2:
+		return
+	var pts := PackedVector2Array()
+	var cols := PackedColorArray()
+	pts.resize(n)
+	cols.resize(n)
+	for i in range(n):
+		var s: Vector3 = _oil_trail[i]
+		pts[i] = Vector2(_sx(s.x), _car_y - (s.z - distance))
+		var f := float(i) / float(n - 1)   # 0 = oldest (tail) -> 1 = at the wheel
+		var c := COL_OILTRAIL
+		c.a = f * f * 0.55
+		cols[i] = c
+	var smear := PackedColorArray()
+	smear.resize(n)
+	var sheen := PackedColorArray()
+	sheen.resize(n)
+	for i in range(n):
+		var w := cols[i]
+		w.a *= 0.35
+		smear[i] = w
+		var f := float(i) / float(n - 1)
+		var g := COL_OILTRAIL_SHEEN
+		var fresh := maxf(f - 0.5, 0.0) * 2.0
+		g.a = fresh * fresh * 0.22
+		sheen[i] = g
+	draw_polyline_colors(pts, smear, 9.0, true)
+	draw_polyline_colors(pts, cols, 4.0, true)
+	draw_polyline_colors(pts, sheen, 2.0, true)
 
 
 func _update_particles(delta: float) -> void:
@@ -2179,7 +2557,9 @@ func _queue_formation() -> void:
 
 
 func _maybe_seed_pattern() -> void:
-	if randf() < 0.32:
+	# low skip chance: crafted shapes are the game's identity, so most stretches
+	# carry an authored pattern rather than plain drift
+	if randf() < 0.2:
 		return
 	if randf() < FORMATION_CHANCE:
 		_queue_formation()
@@ -2504,8 +2884,11 @@ func _make_fork(d0: float, rhw: float) -> Dictionary:
 	var med_r := maxf(base_med * (1.0 + (randf_range(-FORK_OFF_VARY, FORK_OFF_VARY) if asym else 0.0)), 8.0)
 	var off_l := hw_l + med_l
 	var off_r := hw_r + med_r
-	var ramp_l := BRANCH_RAMP * (1.0 + (randf_range(-FORK_RAMP_VARY, FORK_RAMP_VARY) if asym else 0.0))
-	var ramp_r := BRANCH_RAMP * (1.0 + (randf_range(-FORK_RAMP_VARY, FORK_RAMP_VARY) if asym else 0.0))
+	# an island's lanes use the maximum ramp (0.5): the split profile becomes a pure
+	# rise-and-fall arch with no straight middle, so the two lanes BOW around the
+	# grass like the two halves of a roundabout ring instead of running parallel
+	var ramp_l := 0.5 if island else BRANCH_RAMP * (1.0 + (randf_range(-FORK_RAMP_VARY, FORK_RAMP_VARY) if asym else 0.0))
+	var ramp_r := 0.5 if island else BRANCH_RAMP * (1.0 + (randf_range(-FORK_RAMP_VARY, FORK_RAMP_VARY) if asym else 0.0))
 	# length: keep even the widest, fastest-peeling lane within the sweep cap at the
 	# REAL top speed a fork is now driven at (boost applies in forks), then stretch it
 	# by a small random factor. Sizing against the sweep cap is what lets a fork run at
@@ -2842,8 +3225,15 @@ func _draw() -> void:
 	# a whisper of darkening over everything off-road (the road is painted on top
 	# at full brightness) lifts the driving plane for depth — one flat rect, so it
 	# costs nothing and can't soften the pixel art
-	draw_rect(Rect2(0, 0, SCREEN_W, _view_h), Color(0, 0, 0, BG_DARKEN))
+	draw_rect(Rect2(-DRAW_PAD, -DRAW_PAD, SCREEN_W + 2.0 * DRAW_PAD, _view_h + 2.0 * DRAW_PAD), Color(0, 0, 0, BG_DARKEN))
 	_draw_road()
+
+	# menus: the world above is the attract-mode backdrop — add the demo driver's
+	# trail and vehicle, then stop (no hazards/HUD; the blur overlay sits on top)
+	if _in_menu_state():
+		_draw_particles()
+		_draw_player()
+		return
 
 	var in_game := state == State.PLAYING or state == State.CRASH or state == State.GAME_OVER or state == State.COUNTDOWN
 	if not in_game:
@@ -2872,14 +3262,7 @@ func _draw() -> void:
 			draw_circle(Vector2(hx, hy), OIL_R, COL_OIL)
 			draw_circle(Vector2(hx - OIL_R * 0.3, hy - OIL_R * 0.3), OIL_R * 0.35, COL_OIL_HI)
 		elif ht == "block":
-			var bw: float = float(h.get("w", BLOCK_W))
-			draw_rect(Rect2(hx - bw * 0.5 + SHADOW_OFF.x, hy - BLOCK_H * 0.5 + SHADOW_OFF.y, bw, BLOCK_H), SHADOW_COL)
-			draw_rect(Rect2(hx - bw * 0.5, hy - BLOCK_H * 0.5, bw, BLOCK_H), COL_BLOCK)
-			# hazard striping scales with the block's width
-			var nstripes := maxi(2, int(bw / 20.0))
-			var pitch := (bw - 8.0) / float(nstripes)
-			for k in range(nstripes):
-				draw_rect(Rect2(hx - bw * 0.5 + 4.0 + float(k) * pitch, hy - BLOCK_H * 0.5, pitch * 0.45, BLOCK_H), COL_BLOCK_DARK)
+			_draw_barrier(hx, hy, float(h.get("w", BLOCK_W)), hd)
 		elif ht == "traffic":
 			# Enemies are ONCOMING (they travel down-screen, toward the player), so
 			# their sprite must face DOWN — the art is authored nose-up like the
@@ -2935,62 +3318,11 @@ func _draw() -> void:
 			draw_circle(Vector2(cx, cy), COIN_R, COL_COIN)
 			draw_circle(Vector2(cx, cy), COIN_R * 0.55, COL_COIN_HI)
 
-	for pp in _particles:
-		var life := float(pp["life"])
-		var rem := 1.0 - float(pp["age"]) / life
-		if rem > 0.0:
-			var ec: Color = pp.get("col", COL_EXHAUST)
-			ec.a = rem * 0.42
-			_draw_pix_square(_boom_screen(pp), float(pp["r"]) * (0.6 + rem * 0.6), ec)
+	_draw_particles()
 
 	# car (hidden once it has exploded; shown frozen during the resume countdown)
 	if state == State.PLAYING or state == State.COUNTDOWN:
-		# path trail under the car, over the road
-		if _theme_vfx == "wake":
-			_draw_wake()
-		else:
-			_draw_taillights()
-		# boost glow — flashes faster and reddens in its final BOOST_WARN seconds so
-		# you can read at a glance whether the smash-through is still live
-		if _boost_timer > 0.0:
-			var ending := _boost_timer < BOOST_WARN
-			var pulse := 0.6 + 0.4 * sin(time_alive * (46.0 if ending else 18.0))
-			var gcol := COL_BOOST.lerp(Color(1.0, 0.3, 0.22), 0.6) if ending else COL_BOOST
-			gcol.a = (0.5 if ending else 0.35) * pulse
-			draw_circle(Vector2(_sx(car_x), _car_y), CAR_W * (0.95 + 0.12 * pulse), gcol)
-		# chain bump: an expanding ring of pixel squares pops off the car
-		if _combo_flash > 0.0:
-			var cr := CAR_W * (0.8 + (1.0 - _combo_flash) * 1.2)
-			var rc := COL_COMBO
-			rc.a = _combo_flash * 0.8
-			for i in range(10):
-				var ra := TAU * float(i) / 10.0
-				_draw_pix_square(Vector2(_sx(car_x), _car_y) + Vector2(cos(ra), sin(ra)) * cr, 2.5, rc)
-		var ang := _car_angle()
-		var lift := 0.0
-		var sc := 1.0
-		var sh_off := SHADOW_OFF
-		if _air_timer > 0.0:
-			var phase := 1.0 - _air_timer / AIR_TIME
-			var hop := sin(phase * PI)
-			lift = hop * 26.0
-			sc = 1.0 + hop * 0.18
-			sh_off = SHADOW_OFF * (1.0 + hop * 2.2)   # the shadow falls away with height
-		var chw := _car_size.x * 0.5
-		var chh := _car_size.y * 0.5
-		if _tex_car != null:
-			# the shadow is the sprite itself tinted, so it hugs the opaque pixels
-			draw_set_transform(Vector2(_sx(car_x), _car_y) + sh_off, ang, Vector2.ONE)
-			draw_texture_rect(_tex_car, Rect2(-chw, -chh, _car_size.x, _car_size.y), false, SHADOW_COL)
-			draw_set_transform(Vector2(_sx(car_x), _car_y - lift), ang, Vector2(sc, sc))
-			draw_texture_rect(_tex_car, Rect2(-chw, -chh, _car_size.x, _car_size.y), false)
-		else:
-			draw_set_transform(Vector2(_sx(car_x), _car_y) + sh_off, ang, Vector2.ONE)
-			draw_rect(Rect2(-CAR_HALF_W, -CAR_HALF_H, CAR_W, CAR_H), SHADOW_COL)
-			draw_set_transform(Vector2(_sx(car_x), _car_y - lift), ang, Vector2(sc, sc))
-			draw_rect(Rect2(-CAR_HALF_W, -CAR_HALF_H, CAR_W, CAR_H), col_car)
-			draw_rect(Rect2(-CAR_HALF_W + 8.0, -CAR_HALF_H + 18.0, CAR_W - 16.0, 30.0), col_car_dark)
-		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+		_draw_player()
 
 	# explosion — pixel debris (world-anchored, so it stays where the crash happened)
 	for b in _boom:
@@ -3034,11 +3366,76 @@ func _draw() -> void:
 			var n := ceili(_count_timer)
 			draw_string(_ui_font, Vector2(0, _view_h * 0.5), str(n), HORIZONTAL_ALIGNMENT_CENTER, SCREEN_W, 160, Color(1, 1, 1, 0.95))
 
-	# crash flash
+	# crash flash (padded: it plays while the screen shake is at full amplitude)
 	if state == State.CRASH:
 		var f := clampf((_crash_timer - (CRASH_TIME - 0.15)) / 0.15, 0.0, 1.0)
 		if f > 0.0:
-			draw_rect(Rect2(0, 0, SCREEN_W, _view_h), Color(1, 1, 1, f * 0.6))
+			draw_rect(Rect2(-DRAW_PAD, -DRAW_PAD, SCREEN_W + 2.0 * DRAW_PAD, _view_h + 2.0 * DRAW_PAD), Color(1, 1, 1, f * 0.6))
+
+
+# Themed spray/exhaust puffs (world-anchored pixel squares fading out).
+func _draw_particles() -> void:
+	for pp in _particles:
+		var life := float(pp["life"])
+		var rem := 1.0 - float(pp["age"]) / life
+		if rem > 0.0:
+			var ec: Color = pp.get("col", COL_EXHAUST)
+			ec.a = rem * 0.42
+			_draw_pix_square(_boom_screen(pp), float(pp["r"]) * (0.6 + rem * 0.6), ec)
+
+
+# The player vehicle with its path trail, boost glow, combo ring and shadow.
+# Shared by live play, the resume countdown, and the menu's attract-mode drive
+# (where boost/combo/air are simply zero).
+func _draw_player() -> void:
+	# path trail under the car, over the road
+	if _theme_vfx == "wake":
+		_draw_wake()
+	elif _theme_vfx == "mud_bike":
+		_draw_oil_trail()
+	else:
+		_draw_taillights()
+	# boost glow — flashes faster and reddens in its final BOOST_WARN seconds so
+	# you can read at a glance whether the smash-through is still live
+	if _boost_timer > 0.0:
+		var ending := _boost_timer < BOOST_WARN
+		var pulse := 0.6 + 0.4 * sin(time_alive * (46.0 if ending else 18.0))
+		var gcol := COL_BOOST.lerp(Color(1.0, 0.3, 0.22), 0.6) if ending else COL_BOOST
+		gcol.a = (0.5 if ending else 0.35) * pulse
+		draw_circle(Vector2(_sx(car_x), _car_y), CAR_W * (0.95 + 0.12 * pulse), gcol)
+	# chain bump: an expanding ring of pixel squares pops off the car
+	if _combo_flash > 0.0:
+		var cr := CAR_W * (0.8 + (1.0 - _combo_flash) * 1.2)
+		var rc := COL_COMBO
+		rc.a = _combo_flash * 0.8
+		for i in range(10):
+			var ra := TAU * float(i) / 10.0
+			_draw_pix_square(Vector2(_sx(car_x), _car_y) + Vector2(cos(ra), sin(ra)) * cr, 2.5, rc)
+	var ang := _car_angle()
+	var lift := 0.0
+	var sc := 1.0
+	var sh_off := SHADOW_OFF
+	if _air_timer > 0.0:
+		var phase := 1.0 - _air_timer / AIR_TIME
+		var hop := sin(phase * PI)
+		lift = hop * 26.0
+		sc = 1.0 + hop * 0.18
+		sh_off = SHADOW_OFF * (1.0 + hop * 2.2)   # the shadow falls away with height
+	var chw := _car_size.x * 0.5
+	var chh := _car_size.y * 0.5
+	if _tex_car != null:
+		# the shadow is the sprite itself tinted, so it hugs the opaque pixels
+		draw_set_transform(Vector2(_sx(car_x), _car_y) + sh_off, ang, Vector2.ONE)
+		draw_texture_rect(_tex_car, Rect2(-chw, -chh, _car_size.x, _car_size.y), false, SHADOW_COL)
+		draw_set_transform(Vector2(_sx(car_x), _car_y - lift), ang, Vector2(sc, sc))
+		draw_texture_rect(_tex_car, Rect2(-chw, -chh, _car_size.x, _car_size.y), false)
+	else:
+		draw_set_transform(Vector2(_sx(car_x), _car_y) + sh_off, ang, Vector2.ONE)
+		draw_rect(Rect2(-CAR_HALF_W, -CAR_HALF_H, CAR_W, CAR_H), SHADOW_COL)
+		draw_set_transform(Vector2(_sx(car_x), _car_y - lift), ang, Vector2(sc, sc))
+		draw_rect(Rect2(-CAR_HALF_W, -CAR_HALF_H, CAR_W, CAR_H), col_car)
+		draw_rect(Rect2(-CAR_HALF_W + 8.0, -CAR_HALF_H + 18.0, CAR_W - 16.0, 30.0), col_car_dark)
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
 # Combo chain readout, centred under the coin counter: multiplier text that pops
@@ -3080,6 +3477,54 @@ func _draw_lucky() -> void:
 	draw_rect(Rect2(0, _view_h - th, _view_w, th), fc)
 	draw_rect(Rect2(0, th, th, _view_h - 2.0 * th), fc)
 	draw_rect(Rect2(_view_w - th, th, th, _view_h - 2.0 * th), fc)
+
+
+# A roadblock barrier. No sprite slot — this IS the art: a chunky outlined
+# warning board standing on two feet, a mirrored diagonal stripe pattern with a
+# FIXED number of repeats per half (so every random width reads as the same
+# uniform barrier, only scaled), a lit top lip, and two end lamps that blink in
+# alternation. Width bw is the collision width; the lamps/outline overhang is
+# cosmetic only.
+func _draw_barrier(hx: float, hy: float, bw: float, hd: float) -> void:
+	var hh := BLOCK_H * 0.5
+	var half := bw * 0.5
+	draw_rect(Rect2(hx - half + SHADOW_OFF.x, hy - hh + SHADOW_OFF.y, bw, BLOCK_H), SHADOW_COL)
+	# feet, symmetric, poking out under the board
+	var fw := 9.0
+	for s: float in [-1.0, 1.0]:
+		var fx := hx + s * (half - fw * 1.2)
+		draw_rect(Rect2(fx - fw * 0.5, hy + hh - 2.0, fw, 8.0), COL_BLOCK_DARK)
+	# chunky dark outline, then the board
+	draw_rect(Rect2(hx - half - 3.0, hy - hh - 3.0, bw + 6.0, BLOCK_H + 6.0), COL_BLOCK_DARK)
+	draw_rect(Rect2(hx - half, hy - hh, bw, BLOCK_H), COL_BLOCK)
+	# mirrored stripes: BLOCK_STRIPES per half, leaning toward the centre from both
+	# sides so the pattern is symmetric whatever the board's width
+	var inset := 5.0
+	var innw := half - inset * 2.0
+	if innw > 4.0:
+		var pitch := innw / float(BLOCK_STRIPES)
+		var sw := pitch * 0.52
+		var lean := minf(pitch * 0.55, 14.0)
+		var y0 := hy - hh + inset
+		var y1 := hy + hh - inset
+		for k in range(BLOCK_STRIPES):
+			for s: float in [-1.0, 1.0]:
+				var bx := hx + s * (half - inset - (float(k) + 0.5) * pitch)
+				draw_colored_polygon(PackedVector2Array([
+					Vector2(bx - sw * 0.5 * s, y1), Vector2(bx + sw * 0.5 * s, y1),
+					Vector2(bx + (sw * 0.5 + lean) * s, y0), Vector2(bx + (lean - sw * 0.5) * s, y0),
+				]), COL_BLOCK_DARK)
+	# rounded-board read: a lit lip on top, a shaded lip below (drawn over the
+	# stripes so both run unbroken across the width)
+	draw_rect(Rect2(hx - half, hy - hh, bw, 4.0), COL_BLOCK_HI)
+	draw_rect(Rect2(hx - half, hy + hh - 4.0, bw, 4.0), COL_BLOCK_SHADE)
+	# end lamps, blinking in alternation (phase keyed to world distance so two
+	# barriers on screen never flash in lockstep)
+	for s: float in [-1.0, 1.0]:
+		var lit := fposmod(time_alive * 2.0 + hd * 0.002 + (0.5 if s > 0.0 else 0.0), 1.0) < 0.55
+		var lx := hx + s * (half - 8.0)
+		draw_rect(Rect2(lx - 5.0, hy - hh - 8.0, 10.0, 10.0), COL_BLOCK_DARK)
+		draw_rect(Rect2(lx - 3.0, hy - hh - 6.0, 6.0, 6.0), COL_BLOCK_LAMP if lit else COL_BLOCK_LAMP_OFF)
 
 
 # The jump-the-gap hole: a void that follows the road across its length, with a
@@ -3125,8 +3570,8 @@ func _draw_gap(h: Dictionary, hd: float) -> void:
 # split lanes and lets the off-road show through the gap as the median.
 func _draw_road() -> void:
 	var step := 3.0   # finer sampling keeps the polyline smooth through sharp turns
-	var bot_d := distance_at_row(_view_h)
-	var top_d := distance_at_row(0.0)
+	var bot_d := distance_at_row(_view_h + DRAW_PAD)
+	var top_d := distance_at_row(-DRAW_PAD)
 
 	var any_branch := false
 	for b in _branches:
@@ -3139,8 +3584,8 @@ func _draw_road() -> void:
 		var right := PackedVector2Array()
 		var vs := PackedFloat32Array()
 		var centers := PackedVector3Array()
-		var y := 0.0
-		while y <= _view_h:
+		var y := -DRAW_PAD
+		while y <= _view_h + DRAW_PAD:
 			var d := distance_at_row(y)
 			var c := road_center(d)
 			var hw := road_half_width(d)
@@ -3168,8 +3613,8 @@ func _draw_road() -> void:
 	var cen1 := PackedVector3Array()
 	var vs := PackedFloat32Array()
 	var split := PackedInt32Array()   # 1 where the two lane centres have parted — see DASH_SPLIT_EPS
-	var yy := 0.0
-	while yy <= _view_h:
+	var yy := -DRAW_PAD
+	while yy <= _view_h + DRAW_PAD:
 		var d := distance_at_row(yy)
 		var lanes := road_lanes(d)
 		var c0 := float(lanes[0]["c"])
@@ -3426,18 +3871,20 @@ func _draw_background() -> void:
 	if _tex_bg != null:
 		_draw_tiled(_tex_bg, camera_x - _view_w * 0.5, -(distance + _car_y))
 	else:
-		draw_rect(Rect2(0, 0, SCREEN_W, _view_h), col_offroad)
+		draw_rect(Rect2(-DRAW_PAD, -DRAW_PAD, SCREEN_W + 2.0 * DRAW_PAD, _view_h + 2.0 * DRAW_PAD), col_offroad)
 
 
 # Tiles a texture across the whole screen at the given world-scroll offset, each
 # tile drawn at the fixed 256x256 world footprint (whatever the texture's own
 # pixel size or import flags), so ground art always matches the road's scale.
 func _draw_tiled(tex: Texture2D, scroll_x: float, scroll_y: float) -> void:
+	# one extra ring of tiles beyond the view (DRAW_PAD), so the crash shake can
+	# jolt the world without exposing unpainted edges
 	var ts := WORLD_TEX_TILE
-	var y := -fposmod(scroll_y, ts)
-	while y < _view_h:
-		var x := -fposmod(scroll_x, ts)
-		while x < SCREEN_W:
+	var y := -fposmod(scroll_y, ts) - ts
+	while y < _view_h + DRAW_PAD:
+		var x := -fposmod(scroll_x, ts) - ts
+		while x < SCREEN_W + DRAW_PAD:
 			draw_texture_rect(tex, Rect2(x, y, ts, ts), false)
 			x += ts
 		y += ts
@@ -3468,10 +3915,10 @@ func _draw_parallax() -> void:
 	var gx := floorf((camera_x - SCREEN_W) / GRID) * GRID
 	while gx < camera_x + SCREEN_W:
 		var x := _sx(gx)
-		draw_line(Vector2(x, 0), Vector2(x, _view_h), gcol, 1.0)
+		draw_line(Vector2(x, -DRAW_PAD), Vector2(x, _view_h + DRAW_PAD), gcol, 1.0)
 		gx += GRID
-	var gd := floorf((distance + _car_y - _view_h) / GRID) * GRID
-	while gd < distance + _car_y:
+	var gd := floorf((distance + _car_y - _view_h - DRAW_PAD) / GRID) * GRID
+	while gd < distance + _car_y + DRAW_PAD:
 		var yy := _car_y + distance - gd
-		draw_line(Vector2(0, yy), Vector2(SCREEN_W, yy), gcol, 1.0)
+		draw_line(Vector2(-DRAW_PAD, yy), Vector2(SCREEN_W + DRAW_PAD, yy), gcol, 1.0)
 		gd += GRID
